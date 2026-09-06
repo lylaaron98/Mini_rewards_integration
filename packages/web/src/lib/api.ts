@@ -235,9 +235,22 @@ export function fetchRewards(): Promise<Reward[]> {
   return apiRequest<Reward[]>('/api/rewards')
 }
 
-export function fetchTransactions(cursor?: string): Promise<TransactionPage> {
+export type TransactionOrder = 'newest' | 'oldest'
+
+export type TransactionFilters = {
+  type?: TransactionType | undefined
+  order?: TransactionOrder | undefined
+}
+
+export function fetchTransactions(
+  cursor?: string,
+  filters: TransactionFilters = {},
+): Promise<TransactionPage> {
   const query = new URLSearchParams({ limit: '15' })
+
   if (cursor) query.set('cursor', cursor)
+  if (filters.type) query.set('type', filters.type)
+  if (filters.order) query.set('order', filters.order)
 
   return apiRequest<TransactionPage>(`/api/me/transactions?${query.toString()}`)
 }

@@ -432,11 +432,21 @@ export type TransactionPage = {
   nextCursor: string | null
 }
 
+/**
+ * Which end of the ledger to read from.
+ *
+ * Not merely a sort: the cursor comparison flips with it. A cursor means
+ * "everything strictly past this entry", and which side *past* is on depends
+ * entirely on the direction of travel.
+ */
+export type TransactionOrder = 'newest' | 'oldest'
+
 export type ListTransactionsInput = {
   userId: string
   cursor?: string | undefined
   limit: number
   type?: TransactionType | undefined
+  order?: TransactionOrder | undefined
 }
 
 /**
@@ -492,23 +502,51 @@ export async function listTransactions(
   input: ListTransactionsInput,
 ): Promise<TransactionPage> {
   const cursor = input.cursor === undefined ? null : decodeCursor(input.cursor)
+  const order = input.order ?? 'newest'
+
+  /**
+   * The comparison flips with the ordering, and getting this wrong is the
+   * whole bug: a cursor built while reading newest-first, applied with a
+   * newest-first comparison but an oldest-first sort, returns the rows *before*
+   * the cursor in ascending order — a page that silently repeats what the reader
+   * has already seen.
+   *
+   * A cursor is only meaningful for the ordering it was issued under, which is
+   * why the ordering is part of the client's query key: changing it starts a new
+   * list rather than resuming an old one with a cursor that no longer means what
+   * it did.
+   */
+  const direction = order === 'newest' ? 'desc' : 'asc'
+
+  const beyondCursor =
+    cursor === null
+      ? {}
+      : order === 'newest'
+        ? {
+            // Strictly older: an earlier timestamp, or the same timestamp with a
+            // lower id.
+            OR: [
+              { createdAt: { lt: cursor.createdAt } },
+              { createdAt: cursor.createdAt, id: { lt: cursor.id } },
+            ],
+          }
+        : {
+            // Strictly newer, the mirror image. The tie-break flips too — using
+            // `lt` on the id here would drop or repeat entries that share a
+            // millisecond, which a redemption and its reversal routinely do.
+            OR: [
+              { createdAt: { gt: cursor.createdAt } },
+              { createdAt: cursor.createdAt, id: { gt: cursor.id } },
+            ],
+          }
 
   const entries = await tx.pointTransaction.findMany({
     where: {
       userId: input.userId,
       ...(input.type === undefined ? {} : { type: input.type }),
-      ...(cursor === null
-        ? {}
-        : {
-            // Strictly older than the cursor entry: an earlier timestamp, or the
-            // same timestamp with a lower id.
-            OR: [
-              { createdAt: { lt: cursor.createdAt } },
-              { createdAt: cursor.createdAt, id: { lt: cursor.id } },
-            ],
-          }),
+      ...beyondCursor,
     },
-    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    orderBy: [{ createdAt: direction }, { id: direction }],
     // One more than asked for, purely to discover whether another page exists.
     // Counting the whole table instead would cost a scan on every request to
     // answer a question the client only needs as a boolean.

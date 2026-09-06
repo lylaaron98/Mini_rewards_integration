@@ -15,6 +15,13 @@ const transactionQuerySchema = z.object({
    */
   limit: z.coerce.number().int().min(1).max(100).default(20),
   type: z.nativeEnum(TransactionType).optional(),
+
+  /**
+   * Which end to read from. Defaults to newest, which is what a history screen
+   * opens on; oldest is how someone reconstructs a balance forwards from the
+   * beginning, which is the other reason to read a ledger.
+   */
+  order: z.enum(['newest', 'oldest']).default('newest'),
 })
 
 export async function userRoutes(app: FastifyInstance): Promise<void> {
@@ -63,6 +70,7 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       cursor: query.data.cursor,
       limit: query.data.limit,
       type: query.data.type,
+      order: query.data.order,
     })
 
     return reply.send(page)

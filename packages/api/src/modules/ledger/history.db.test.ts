@@ -160,6 +160,91 @@ describe('listTransactions', () => {
   })
 
   /**
+   * Oldest-first is not just the sort reversed — the cursor comparison flips
+   * with it. Reading forwards with a backwards comparison returns the rows
+   * *before* the cursor, so page two repeats page one and nothing errors.
+   */
+  it('walks the whole ledger oldest first without repeating an entry', async () => {
+    const userId = await createUserWithEntries(10)
+
+    const seen: string[] = []
+    let cursor: string | undefined
+
+    for (let page = 0; page < 10; page += 1) {
+      const result = await listTransactions(prisma, { userId, limit: 3, cursor, order: 'oldest' })
+      seen.push(...result.items.map((entry) => entry.description))
+
+      if (result.nextCursor === null) break
+      cursor = result.nextCursor
+    }
+
+    expect(seen).toHaveLength(10)
+    expect(new Set(seen).size).toBe(10)
+
+    // Entry 0 is the oldest, so it leads.
+    expect(seen[0]).toBe('Entry 0')
+    expect(seen[9]).toBe('Entry 9')
+  })
+
+  /**
+   * The two orderings must be exact mirrors. If they are not, one of them is
+   * dropping or duplicating an entry at a page boundary.
+   */
+  it('returns the same entries in both directions, reversed', async () => {
+    const userId = await createUserWithEntries(7)
+
+    const collect = async (order: 'newest' | 'oldest') => {
+      const seen: string[] = []
+      let cursor: string | undefined
+
+      for (let page = 0; page < 10; page += 1) {
+        const result = await listTransactions(prisma, { userId, limit: 2, cursor, order })
+        seen.push(...result.items.map((entry) => entry.description))
+        if (result.nextCursor === null) break
+        cursor = result.nextCursor
+      }
+
+      return seen
+    }
+
+    const newest = await collect('newest')
+    const oldest = await collect('oldest')
+
+    expect(newest).toHaveLength(7)
+    expect([...oldest].reverse()).toEqual(newest)
+  })
+
+  /**
+   * A filter and an ordering have to compose. Applying one and quietly dropping
+   * the other is the kind of bug that produces a plausible list nobody checks.
+   */
+  it('applies a type filter and an ordering together', async () => {
+    const userId = await createUserWithEntries(3)
+
+    for (const [index, delta] of [-5, -6].entries()) {
+      await prisma.$transaction((tx) =>
+        appendEntry(tx, {
+          userId,
+          delta,
+          type: TransactionType.REDEEM,
+          source: 'redemption',
+          description: `Spend ${index}`,
+          createdAt: new Date(Date.now() + (index + 1) * 60_000),
+        }),
+      )
+    }
+
+    const spends = await listTransactions(prisma, {
+      userId,
+      limit: 10,
+      type: TransactionType.REDEEM,
+      order: 'oldest',
+    })
+
+    expect(spends.items.map((entry) => entry.description)).toEqual(['Spend 0', 'Spend 1'])
+  })
+
+  /**
    * A cursor that no longer decodes — an old link, a truncated copy-paste, a
    * changed sort key — starts from the beginning rather than erroring. There is
    * nothing a user could do with "invalid cursor", and showing them the top of

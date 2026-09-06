@@ -23,6 +23,7 @@ export function History({
   hasMore,
   onLoadMore,
   heading = 'Activity',
+  emptyDetail = 'Points appear when the partner sends activity. Use the developer panel to simulate some.',
 }: {
   entries: LedgerEntry[] | undefined
   isLoading: boolean
@@ -35,6 +36,8 @@ export function History({
    * everyone else.
    */
   heading?: string | null
+  /** What to suggest when there is nothing to show. Differs once a filter is on. */
+  emptyDetail?: string
 }) {
   return (
     <section
@@ -54,10 +57,7 @@ export function History({
       )}
 
       {!isLoading && entries?.length === 0 && (
-        <EmptyState
-          title="Nothing here yet"
-          detail="Points appear when the partner sends activity. Use the developer panel below to simulate some."
-        />
+        <EmptyState title="Nothing here yet" detail={emptyDetail} />
       )}
 
       {!isLoading && entries && entries.length > 0 && (

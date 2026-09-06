@@ -17,8 +17,10 @@ export function OverviewPage({ onNavigate }: { onNavigate: (next: Route) => void
   const me = useQuery({ queryKey: ['me'], queryFn: fetchMe })
 
   const transactions = useInfiniteQuery({
-    queryKey: ['transactions'],
-    queryFn: ({ pageParam }) => fetchTransactions(pageParam),
+    // Same key as the Activity page's default view, so moving between the two
+    // costs no request and shows no loading state.
+    queryKey: ['transactions', { type: null, order: 'newest' }],
+    queryFn: ({ pageParam }) => fetchTransactions(pageParam, { order: 'newest' }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
   })
