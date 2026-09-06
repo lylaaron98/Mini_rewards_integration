@@ -4,6 +4,17 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['src/**/*.test.ts'],
+
+    /**
+     * Tests needing a live database are named `*.db.test.ts` and run separately
+     * via `pnpm test:db`.
+     *
+     * The split exists so that `pnpm test` is honest: it passes or fails on the
+     * code, never on whether Docker happens to be running. The alternative —
+     * skipping database tests when no database is reachable — turns a suite that
+     * silently tested nothing into a green tick, which is worse than a red one.
+     */
+    exclude: ['**/node_modules/**', '**/dist/**', 'src/**/*.db.test.ts'],
     env: {
       /**
        * `env.ts` exits the process on a missing DATABASE_URL, and importing the

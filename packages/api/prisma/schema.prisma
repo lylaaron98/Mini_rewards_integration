@@ -1,12 +1,14 @@
-// Phase 0 defines the datasource and generator only. The domain models —
-// deliveries, point_transactions, user_balances, rewards, redemptions,
-// idempotency keys and versioned earning rules — land in Phase 1, together with
-// the two dedupe constraints and the `CHECK (balance >= 0)` backstop that need
-// to be reasoned about as one design rather than added piecemeal.
+// The domain model.
 //
-// An empty model set still generates a usable client, which is what lets
-// `src/lib/db.ts` export `Tx` and the readiness probe prove connectivity before
-// a single table exists.
+// The organising idea is that points are money. `point_transactions` is an
+// append-only ledger and is the only source of truth about what a user has
+// earned or spent; `user_balances` is a cache of its sum. Nothing in this
+// schema is ever updated to correct a past fact — corrections are new rows.
+//
+// CHECK and EXCLUDE constraints that Prisma cannot express live in the
+// migration alongside the tables they guard, not in a side-car .sql script.
+// A separate script is a step someone forgets to run, and forgetting it removes
+// a backstop silently rather than loudly.
 
 generator client {
   provider = "prisma-client-js"
@@ -15,4 +17,382 @@ generator client {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum TransactionType {
+  /// Points credited for partner activity. Always positive.
+  EARN
+
+  /// Points spent on a reward. Always negative.
+  REDEEM
+
+  /// Undoes an earlier entry after the fact — a failed fulfilment, mainly.
+  /// Signed either way, because it mirrors whatever it reverses.
+  REVERSAL
+
+  /// Manual correction by an operator. Signed either way, deliberately.
+  ADJUSTMENT
+}
+
+enum RedemptionStatus {
+  /// Points are debited and stock is held, but fulfilment has not completed.
+  /// This is a real state a row can be stuck in, not a transient one — see the
+  /// note on `reservedAt` below.
+  RESERVED
+  FULFILLED
+  FAILED
+}
+
+enum DeliveryStatus {
+  /// Accepted and stored, not yet processed.
+  RECEIVED
+
+  /// Credited to a user.
+  PROCESSED
+
+  /// Well-formed and authentic, but we could not price it. Our gap, not the
+  /// partner's — recoverable via backfill.
+  UNMATCHED
+
+  /// Permanently invalid: bad signature, malformed body, timestamp outside the
+  /// accepted window. Retrying will never help.
+  REJECTED
+
+  /// Failed for a reason that might not recur. Retrying might help.
+  FAILED
+}
+
+enum UnmatchedReason {
+  UNKNOWN_USER
+  NO_RULE
+}
+
+// ---------------------------------------------------------------------------
+// Models
+// ---------------------------------------------------------------------------
+
+model User {
+  id String @id @default(uuid())
+
+  /// The partner's identifier for this person, as it arrives in the webhook.
+  ///
+  /// Unique globally rather than per partner. That is right for a single
+  /// integration and wrong the moment a second partner uses colliding
+  /// references — at which point this becomes @@unique([partner, externalRef]).
+  /// Recorded as a known gap in NOTES.md rather than pre-built.
+  externalRef String  @unique @map("external_ref")
+  displayName String  @map("display_name")
+  email       String?
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  balance      UserBalance?
+  transactions PointTransaction[]
+  redemptions  Redemption[]
+
+  @@map("users")
+}
+
+/// The ledger. Append-only: no row here is ever updated or deleted.
+///
+/// Every fact about a user's points is derived from these rows. That is what
+/// makes the system auditable — "why does this person have 430 points" is
+/// answerable by reading rows rather than by trusting a number.
+model PointTransaction {
+  id String @id @default(uuid())
+
+  userId String @map("user_id")
+
+  /// Signed, and never zero. Storing the direction in the sign rather than in a
+  /// separate column means a balance is `SUM(delta)` with no CASE expression to
+  /// get wrong, and no way to represent "positive amount, negative meaning".
+  delta Int
+
+  type TransactionType
+
+  /// Where this entry came from: "partner:acme" for webhook credits,
+  /// "redemption" for spends, "admin" for manual adjustments. Paired with
+  /// `externalEventId` it is the ledger's own idempotency key.
+  source String
+
+  /// The partner's event id, for entries that came from a webhook. Null for
+  /// spends and adjustments, which is exactly what makes the unique constraint
+  /// below work: Postgres does not consider two NULLs equal, so unlimited
+  /// non-webhook entries coexist while webhook credits stay deduplicated.
+  externalEventId String? @map("external_event_id")
+
+  redemptionId String? @map("redemption_id")
+
+  /// The rule that priced this entry, captured at the time it was priced.
+  ///
+  /// Snapshotted as a reference rather than re-derived later because rules are
+  /// versioned and change: recomputing "what was this worth" a year from now
+  /// against today's rules would silently rewrite history. This column answers
+  /// "why is this 15 points" with the specific rule that said so.
+  ruleId String? @map("rule_id")
+
+  /// For REVERSAL entries, the entry being undone.
+  ///
+  /// Unique, so a given entry can be reversed at most once. Without it, a retry
+  /// of a failed fulfilment could write two compensating entries and hand the
+  /// user back twice what they spent. Postgres allows many NULLs, so ordinary
+  /// entries are unaffected.
+  reversesId String? @unique @map("reverses_id")
+
+  /// Human-readable, written once, never recomputed. It is the line a support
+  /// agent reads. Deriving it at display time would mean today's copy changes
+  /// what a two-year-old transaction appears to say.
+  description String
+
+  /// Room for provenance that does not deserve a column — partner payload
+  /// fragments, operator notes on an adjustment.
+  metadata Json?
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  // A ledger row must never be orphaned, so every one of these restricts
+  // deletion of what it points at. Deleting a user, a rule or a reward that has
+  // financial history should fail loudly rather than quietly erase the reason a
+  // balance is what it is.
+  user       User              @relation(fields: [userId], references: [id], onDelete: Restrict)
+  redemption Redemption?       @relation(fields: [redemptionId], references: [id], onDelete: Restrict)
+  rule       EarningRule?      @relation(fields: [ruleId], references: [id], onDelete: Restrict)
+  reverses   PointTransaction? @relation("ReversalOf", fields: [reversesId], references: [id], onDelete: Restrict)
+  reversedBy PointTransaction? @relation("ReversalOf")
+
+  /// LEDGER INVARIANT: "this partner event has been credited at most once."
+  ///
+  /// This is the load-bearing dedupe constraint, and it is deliberately not the
+  /// only one — see the matching constraint on WebhookDelivery.
+  ///
+  /// That one records "we have seen this event" and drives the HTTP response.
+  /// This one holds no matter which caller reached appendEntry. Ingestion is not
+  /// the only writer: backfillUnmatched replays events, a queue worker will
+  /// replay them, and eventually someone re-runs a delivery by hand. Each of
+  /// those is a path where a bookkeeping bug becomes a double credit — unless
+  /// the ledger itself refuses. In normal operation this never fires. It fires
+  /// exactly when something upstream is wrong, which is when you want it.
+  @@unique([source, externalEventId])
+
+  /// Cursor pagination for transaction history. `id` breaks ties so that two
+  /// rows written in the same millisecond cannot cause a page boundary to skip
+  /// or repeat an entry.
+  @@index([userId, createdAt(sort: Desc), id(sort: Desc)])
+  @@map("point_transactions")
+}
+
+/// A cache of `SUM(delta)` per user. Never the source of truth.
+///
+/// It exists because reading a balance is the most common operation in the app
+/// and summing an unbounded ledger on every page load does not stay fast. It is
+/// written in the same transaction as the ledger row that changes it, so the two
+/// can never disagree at a commit boundary — and `reconcile()` proves that
+/// claim rather than assuming it.
+model UserBalance {
+  userId String @id @map("user_id")
+
+  /// Guarded by CHECK (balance >= 0) in the migration, underneath the
+  /// application's own funds check. The application check produces a good error
+  /// message; this one makes a negative balance impossible even if that check is
+  /// bypassed by a bug.
+  balance Int @default(0)
+
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  // Cascade here, Restrict on the ledger. The asymmetry is the point: a cache
+  // may be discarded with the user it describes, financial history may not.
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_balances")
+}
+
+/// What an activity is worth, versioned by validity window.
+///
+/// Versioned rather than mutable because pricing resolves against the event's
+/// `occurredAt`, not the time we happen to process it. A partner retry that
+/// arrives three weeks late is then priced exactly as it would have been on the
+/// day it happened, and replaying the whole history in any order produces the
+/// same balance.
+model EarningRule {
+  id String @id @default(uuid())
+
+  activityType String @map("activity_type")
+  points       Int
+
+  /// Half-open window: [effectiveFrom, effectiveTo). A null `effectiveTo` means
+  /// "still current". Half-open is what lets one version end at the exact
+  /// instant the next begins with no gap and no overlap.
+  effectiveFrom DateTime  @map("effective_from") @db.Timestamptz(3)
+  effectiveTo   DateTime? @map("effective_to") @db.Timestamptz(3)
+
+  /// Soft-disable. Deleting a rule is not an option — ledger entries reference
+  /// the rule that priced them, and that reference has to stay resolvable.
+  active Boolean @default(true)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  transactions PointTransaction[]
+
+  // Overlapping windows for one activity type would make pricing
+  // non-deterministic. That is prevented by an EXCLUDE constraint in the
+  // migration rather than by convention.
+  @@index([activityType, active, effectiveFrom])
+  @@map("earning_rules")
+}
+
+model Reward {
+  id String @id @default(uuid())
+
+  sku         String @unique
+  name        String
+  description String
+
+  costPoints Int @map("cost_points")
+
+  /// Null means unlimited. A nullable integer rather than a separate
+  /// `unlimited` boolean, because two columns can contradict each other and one
+  /// cannot.
+  stock Int?
+
+  active Boolean @default(true)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  redemptions Redemption[]
+
+  @@map("rewards")
+}
+
+model Redemption {
+  id String @id @default(uuid())
+
+  userId   String @map("user_id")
+  rewardId String @map("reward_id")
+
+  status RedemptionStatus @default(RESERVED)
+
+  /// What the reward cost and was called *at the moment of redemption*.
+  ///
+  /// Snapshotted, not joined. Prices change and rewards get renamed, and a
+  /// receipt that silently re-reads today's values is not a receipt — a user
+  /// looking at last year's redemption must see the 500 points they actually
+  /// paid, not the 750 it costs now. The relation is still here for provenance;
+  /// these columns are what gets displayed.
+  costPointsSnapshot Int    @map("cost_points_snapshot")
+  rewardNameSnapshot String @map("reward_name_snapshot")
+
+  /// Client-supplied, required. A double-clicked button and a retried request
+  /// are the same threat as a partner retry, and this is what makes them
+  /// harmless. Unique per user rather than globally, so two users cannot
+  /// collide by both sending "1".
+  idempotencyKey String @map("idempotency_key")
+
+  fulfillmentRef String? @map("fulfillment_ref")
+  failureReason  String? @map("failure_reason")
+
+  /// When the reservation was taken.
+  ///
+  /// Fulfilment happens outside the database transaction — holding one open
+  /// across a third-party call would let a slow partner hold locks on live
+  /// balances. The cost is that a crash between the commit and the fulfilment
+  /// call strands a row in RESERVED with the user's points already debited.
+  /// This column is what makes those findable: "reserved more than N minutes
+  /// ago and still RESERVED" is a sweepable query. Recording it turns an
+  /// invisible hole into a known, documented boundary.
+  reservedAt DateTime @default(now()) @map("reserved_at") @db.Timestamptz(3)
+
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  fulfilledAt DateTime? @map("fulfilled_at") @db.Timestamptz(3)
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Restrict)
+  reward Reward @relation(fields: [rewardId], references: [id], onDelete: Restrict)
+
+  transactions PointTransaction[]
+
+  /// Makes a retry idempotent at the database level rather than by checking
+  /// first and hoping nothing commits in between. The claim is taken with
+  /// INSERT ... ON CONFLICT DO NOTHING RETURNING before anything valuable is
+  /// touched, so a losing racer never gets far enough to spend points.
+  @@unique([userId, idempotencyKey])
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("redemptions")
+}
+
+/// Every webhook we accept, stored before it is interpreted.
+///
+/// Written first, parsed second, deliberately. The partner's payload is the only
+/// evidence of what they actually sent; if we parse first and store the result,
+/// then a payload we misunderstood leaves no trace of the misunderstanding. This
+/// table is what makes "the partner says they sent it" an answerable question,
+/// and what lets an UNMATCHED event be replayed correctly weeks later.
+model WebhookDelivery {
+  id String @id @default(uuid())
+
+  partner String
+
+  /// Required by contract. A payload without one is rejected with a permanent
+  /// 400 rather than having a key synthesised for it: hashing
+  /// (userRef, activityType, occurredAt) would merge two legitimately distinct
+  /// activities in the same second into one and cost the user points with no
+  /// trace. Only the partner knows whether two identical-looking events are the
+  /// same event.
+  externalEventId String @map("external_event_id")
+
+  status DeliveryStatus @default(RECEIVED)
+
+  /// Load-bearing, not decorative. `backfillUnmatched` cannot target precisely
+  /// without being able to tell "no rule exists for this activity type" from
+  /// "we have never seen this user" — the first is fixed by adding a rule and
+  /// replaying by activity type, the second by creating a user and replaying by
+  /// user reference.
+  unmatchedReason UnmatchedReason? @map("unmatched_reason")
+
+  /// The exact bytes received, as text rather than as `Json`.
+  ///
+  /// Two reasons. A malformed body cannot be stored in a `json` column at all,
+  /// and malformed bodies are precisely the ones worth keeping. And the HMAC is
+  /// computed over the raw bytes, so parsing and re-serialising loses the only
+  /// form in which a signature can be re-checked — key order and whitespace do
+  /// not survive the round trip.
+  rawPayload String @map("raw_payload")
+
+  /// Denormalised out of the payload once it parses, so the deliveries view and
+  /// the backfill sweep can filter without reading JSON out of text.
+  userRef      String? @map("user_ref")
+  activityType String? @map("activity_type")
+
+  /// Why this delivery failed, for the REJECTED and FAILED cases.
+  error String?
+
+  /// Retries of the same event id increment this instead of writing a new row.
+  /// A partner retrying forty times is one delivery seen forty times, not forty
+  /// deliveries, and the difference matters when reading the view.
+  attempts Int @default(1)
+
+  receivedAt  DateTime  @default(now()) @map("received_at") @db.Timestamptz(3)
+  processedAt DateTime? @map("processed_at") @db.Timestamptz(3)
+
+  /// INGESTION INVARIANT: "we have seen this event."
+  ///
+  /// Scoped per partner so two partners both using "evt_1" do not collide. This
+  /// is the fast, expected path: it drives the HTTP response and the
+  /// `duplicate: true` flag, and it is what makes a partner's retry cheap.
+  ///
+  /// It is not sufficient on its own, which is why the ledger carries its own
+  /// constraint. This one can only speak for events that arrived through
+  /// ingestion; the ledger's speaks for every writer, including replays and
+  /// manual re-runs that never touch this table.
+  @@unique([partner, externalEventId])
+
+  /// The backfill sweep: find everything parked for a given reason, oldest
+  /// first, once the missing rule or user exists.
+  @@index([status, unmatchedReason, receivedAt])
+
+  /// The deliveries view, newest first.
+  @@index([receivedAt(sort: Desc)])
+  @@map("webhook_deliveries")
 }

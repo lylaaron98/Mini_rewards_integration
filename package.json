@@ -11,12 +11,14 @@
     "dev": "pnpm -r --parallel dev",
     "build": "pnpm -r build",
     "test": "pnpm -r test",
+    "test:db": "pnpm --filter @rewards/api test:db",
     "typecheck": "pnpm -r typecheck",
     "db:up": "docker compose up -d",
     "db:down": "docker compose down",
     "db:generate": "pnpm --filter @rewards/api db:generate",
     "db:migrate": "pnpm --filter @rewards/api db:migrate",
     "db:reset": "pnpm --filter @rewards/api db:reset",
+    "db:seed": "pnpm --filter @rewards/api db:seed",
     "db:studio": "pnpm --filter @rewards/api db:studio"
   },
   "devDependencies": {

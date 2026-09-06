@@ -201,6 +201,150 @@ ledger constraint from §2 sits underneath that as the real guarantee.
 Note that a retry of an `UNMATCHED` event replays as **202** with `duplicate: true`, not 200:
 the status code reflects the delivery's outcome, and that outcome has not changed.
 
+## 8. The shape of the data
+
+Seven tables. The organising split is that **`point_transactions` is the only
+place a fact about points lives**, and everything else is either input to it,
+derived from it, or context for reading it.
+
+### Append-only means corrections are new rows
+
+Nothing in the ledger is ever updated or deleted. A failed fulfilment does not
+edit the debit that preceded it — it writes a `REVERSAL` entry pointing at it
+through `reversesId`. That column is unique, so a given entry can be reversed at
+most once; without it a retried failure handler could write two compensating
+entries and hand back twice what was spent.
+
+The cost is that the ledger grows and a balance is a sum over it. That is what
+`user_balances` is for, and why it is written in the same transaction as the
+entry that moves it. The cache can be rebuilt from the ledger at any time. The
+ledger can never be rebuilt from the cache — which is the whole reason the
+direction of derivation matters.
+
+### The sign carries the meaning
+
+`delta` is a signed integer and the type must agree with its sign: `EARN`
+positive, `REDEEM` negative, `REVERSAL` and `ADJUSTMENT` either way. A balance is
+then `SUM(delta)` with no CASE expression to get wrong, and "positive amount with
+negative meaning" is not representable. `CHECK (delta <> 0)` rejects entries that
+record that something happened while asserting nothing did.
+
+Integer points throughout, never floats. Points are money and money is not
+binary-fractional.
+
+### Snapshots, because a receipt is not a join
+
+`costPointsSnapshot` and `rewardNameSnapshot` are copied onto the redemption at
+the moment it happens rather than read back through the reward relation. Prices
+change and products get renamed; a user looking at last year's redemption must
+see the 250 points they actually paid for the thing that was actually called
+that. Re-reading today's values would silently rewrite history every time the
+catalogue is edited. The relation is kept for provenance — the snapshot is what
+gets displayed.
+
+`ruleId` on the ledger is the same argument for earning. It records *which
+version of which rule* priced an entry, so "why is this worth 15" is answerable
+by looking up a row rather than by re-running today's pricing against a
+year-old event and hoping the answer has not moved.
+
+`description` is written once for the same reason. Deriving display text at read
+time means today's copy changes what an old transaction appears to say.
+
+### Raw payloads are text, not JSON
+
+`webhook_deliveries.rawPayload` is a text column holding the exact bytes
+received. Two reasons, both of which rule out `json`:
+
+- A malformed body cannot be stored in a `json` column at all — and malformed
+  bodies are exactly the ones worth keeping, because they are the evidence in
+  the conversation that starts "we definitely sent that".
+- The HMAC is computed over the raw bytes. Parsing and re-serialising does not
+  preserve key order or whitespace, so a stored `json` value cannot be used to
+  re-verify a signature afterwards.
+
+`userRef` and `activityType` are denormalised out of the payload once it parses,
+so the deliveries view and the backfill sweep can filter without digging through
+text.
+
+### `unmatchedReason` is load-bearing
+
+`UNKNOWN_USER` and `NO_RULE` are fixed differently — one by creating a user and
+replaying by user reference, the other by adding a rule and replaying by activity
+type. `backfillUnmatched` cannot target either without being able to tell them
+apart, so the distinction is a column rather than something inferred by
+re-parsing the payload later.
+
+### Timestamps are `timestamptz`
+
+Every date column is `@db.Timestamptz(3)`, not Prisma's default `timestamp(3)`.
+Pricing resolves an event's `occurredAt` against rule windows, and comparing
+instants that do not carry a zone is a bug that only appears once the server, the
+database and the partner stop agreeing about what time it is. This is one of the
+few decisions here that is nearly free to make correctly up front and genuinely
+painful to migrate later.
+
+### Constraints live in the migration
+
+Everything Prisma's schema language cannot express is appended to the same
+migration as the tables it guards, not kept in a side-car `.sql` script. A
+separate script is a step someone forgets, and forgetting it does not fail — it
+removes a backstop and leaves a database that looks right until the day it
+matters.
+
+| Constraint | Guards against |
+| --- | --- |
+| `user_balances_balance_non_negative` | Points spent that were never earned |
+| `point_transactions_delta_non_zero` | Entries that record nothing |
+| `point_transactions_delta_sign_matches_type` | An `EARN` that drains a balance |
+| `earning_rules_no_overlapping_windows` | Ambiguous pricing (EXCLUDE, GiST) |
+| `earning_rules_window_ordered` | A window ending before it starts |
+| `rewards_stock_non_negative` | Overselling by any route |
+| `rewards_cost_points_positive` | Free money |
+
+Each sits underneath an application check that already prevents the same thing.
+That is deliberate: the application check produces the good error message, and
+the constraint makes the bad state unreachable when a bug, a replay or a psql
+session bypasses it.
+
+The overlap constraint is the one worth singling out. `EXCLUDE USING gist` with
+`tstzrange(effective_from, COALESCE(effective_to, 'infinity'), '[)')` is what
+makes "rules never overlap" a property of the database rather than a convention
+the seed script happens to follow. It is partial, on `active`, because a
+superseded rule is kept forever so the entries it priced stay explicable, and
+keeping it must not block its replacement.
+
+### Indexes
+
+Three that exist for a named query, rather than by reflex:
+
+- `(user_id, created_at DESC, id DESC)` on the ledger — cursor pagination for
+  transaction history. `id` breaks ties so two entries written in the same
+  millisecond cannot make a page boundary skip or repeat a row.
+- `(status, unmatched_reason, received_at)` on deliveries — the backfill sweep:
+  everything parked for one reason, oldest first.
+- `(received_at DESC)` on deliveries — the deliveries view.
+
+### Seed data
+
+Three users, four rules, five rewards, and a history for two of them. Shaped
+around the states that are otherwise hard to reach by clicking:
+
+- Purchases priced at both 10 and 15 points, because the rule changed at the
+  start of 2026. Rule versioning is visible in the history rather than merely
+  implemented.
+- A fulfilled redemption and a failed-and-reversed one, so the compensating path
+  has a worked example.
+- Deliveries in both `UNMATCHED` states and one `REJECTED` with a genuinely
+  malformed payload.
+- One user with no activity at all, because the empty state is a real screen and
+  it is the one most likely to be broken by nobody ever seeing it.
+- Rewards from 50 to 25,000 points, so both "affordable immediately" and
+  "insufficient funds" are reachable without editing the database.
+
+The seed runs in one transaction and verifies `balance == SUM(delta)` before
+committing — the same property `reconcile()` will check in production, applied
+to the data it just wrote.
+
 ---
 
 ## Smaller choices
@@ -247,6 +391,15 @@ failure rather than a loud one, which is why they are written down.
   server, which reads as a startup problem rather than an address mismatch. Browsers fall
   back and are unaffected, so this only bites command-line testing — but it bit twice while
   verifying setup, in both directions. Documented in the README.
+- **PostgreSQL checks CHECK constraints on an upsert's *proposed insert* before it detects
+  the conflict.** Writing a balance move as a single upsert carrying the delta —
+  `create: { balance: delta }, update: { increment: delta }` — is rejected by
+  `CHECK (balance >= 0)` on the first debit against an *existing* row, because the
+  tuple the INSERT proposes is validated before the unique-key conflict diverts it
+  to the update path. The error names a row that was never going to be written.
+  The fix is the pattern the ledger needed anyway: materialise the row at zero,
+  then move it. That form is also required because `FOR UPDATE` locks nothing when
+  the row does not yet exist.
 - **pnpm 11 renamed `onlyBuiltDependencies` to `allowBuilds`.** With the old key, install
   reports success but skips Prisma's postinstall, so the client is never generated and the
   first `tsc` fails with import errors that point nowhere near the cause.

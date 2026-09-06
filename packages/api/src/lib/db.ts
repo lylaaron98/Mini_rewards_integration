@@ -46,5 +46,9 @@ export const prisma = new PrismaClient({
   // Query logging in development only. In production these lines would carry
   // user references and point amounts into the log aggregator, which is a data
   // exposure problem rather than an observability win.
-  log: env.NODE_ENV === 'development' ? ['warn', 'error'] : ['error'],
+  //
+  // Silent under test. Several integration tests assert that a constraint
+  // rejects a bad write, and logging those expected errors buries a passing
+  // run in what looks like a stack of failures.
+  log: env.NODE_ENV === 'development' ? ['warn', 'error'] : env.NODE_ENV === 'test' ? [] : ['error'],
 })
