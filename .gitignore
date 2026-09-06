@@ -1,0 +1,15 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Secrets. `.env.example` is committed; `.env` never is.
+.env
+.env.*
+!.env.example
+
+*.log
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json

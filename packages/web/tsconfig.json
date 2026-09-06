@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    // Vite resolves imports, not Node, so extensionless relative imports are
+    // correct here — unlike the API package, which runs as real ESM.
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "types": ["vite/client"],
+    "noEmit": true,
+    "allowImportingTsExtensions": true
+  },
+  "include": ["src", "vite.config.ts"]
+}

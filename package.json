@@ -1,0 +1,25 @@
+{
+  "name": "mini-rewards-integration",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.1.1",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "pnpm -r --parallel dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck",
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "db:generate": "pnpm --filter @rewards/api db:generate",
+    "db:migrate": "pnpm --filter @rewards/api db:migrate",
+    "db:reset": "pnpm --filter @rewards/api db:reset",
+    "db:studio": "pnpm --filter @rewards/api db:studio"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}

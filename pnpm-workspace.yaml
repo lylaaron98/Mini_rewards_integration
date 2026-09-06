@@ -1,0 +1,15 @@
+packages:
+  - 'packages/*'
+
+# pnpm refuses to run dependency lifecycle scripts unless they are approved
+# here. Prisma's postinstall is what generates the typed client, and esbuild
+# fetches its platform binary on install. Without these, `pnpm install` reports
+# success but leaves an unusable toolchain behind an interactive prompt, which
+# is a miserable first five minutes for anyone cloning this repo.
+#
+# (The key is `allowBuilds` on pnpm 11+; it was `onlyBuiltDependencies` on 10.)
+allowBuilds:
+  '@prisma/client': true
+  '@prisma/engines': true
+  prisma: true
+  esbuild: true

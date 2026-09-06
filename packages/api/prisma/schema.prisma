@@ -1,0 +1,18 @@
+// Phase 0 defines the datasource and generator only. The domain models —
+// deliveries, point_transactions, user_balances, rewards, redemptions,
+// idempotency keys and versioned earning rules — land in Phase 1, together with
+// the two dedupe constraints and the `CHECK (balance >= 0)` backstop that need
+// to be reasoned about as one design rather than added piecemeal.
+//
+// An empty model set still generates a usable client, which is what lets
+// `src/lib/db.ts` export `Tx` and the readiness probe prove connectivity before
+// a single table exists.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}

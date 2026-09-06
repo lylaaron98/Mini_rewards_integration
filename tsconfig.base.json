@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+
+    "strict": true,
+    // Points are money, so an off-by-one on an array index should be a type
+    // error rather than an `undefined` that silently becomes NaN in a balance.
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+
+    // Type-only imports must say `import type`. This keeps the emitted JS
+    // predictable, which matters because the API runs as real ESM in Node
+    // rather than through a bundler.
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "sourceMap": true
+  }
+}

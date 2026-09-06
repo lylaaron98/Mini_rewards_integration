@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // Real ESM in Node, not a bundler. This is why relative imports below carry
+    // an explicit `.js` extension even though the source files are `.ts`:
+    // that is what the runtime resolver will actually look for.
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "outDir": "dist",
+    "rootDir": "src",
+    "types": ["node"]
+  },
+  "include": ["src"],
+  "exclude": ["dist", "node_modules"]
+}

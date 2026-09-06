@@ -1,0 +1,9 @@
+# Normalise line endings. This repo is written on Windows and will be read on
+# macOS or Linux; without this, every file arrives looking modified and the
+# reviewer's first `git diff` is noise.
+* text=auto eol=lf
+
+# The lockfile is committed and must stay committed — it is what makes
+# `pnpm install` reproduce the exact tree this was tested against — but its
+# diffs are machine-generated and never worth reading.
+pnpm-lock.yaml -diff linguist-generated
