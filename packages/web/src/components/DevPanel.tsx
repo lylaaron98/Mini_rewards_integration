@@ -1,10 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 
-import { fetchDeliveries, fetchReconcile, simulateActivity } from '../lib/api'
+import { fetchDeliveries, fetchReconcile, fetchUsers, simulateActivity } from '../lib/api'
 import type { Delivery } from '../lib/api'
 import { formatTimestamp } from '../lib/format'
 import { useToast } from '../lib/toast'
+import { RewardAdmin } from './RewardAdmin'
 
 /**
  * The developer panel.
@@ -19,37 +20,36 @@ import { useToast } from '../lib/toast'
  * and sends it through the real webhook route. Nothing here bypasses
  * verification; it is the partner's request, made from a button.
  */
-export function DevPanel({ userRef }: { userRef: string | null }) {
-  const [open, setOpen] = useState(false)
+export function DevPanel({ defaultUserRef }: { defaultUserRef: string }) {
+  /**
+   * Which user the simulated events are credited to.
+   *
+   * An administrator has no history of their own, so sending events to
+   * themselves would demonstrate nothing. Choosing a target is also what the
+   * tool actually is — an operator acting on behalf of a user — rather than a
+   * shortcut that only works when you happen to be the person you are testing.
+   */
+  const [targetRef, setTargetRef] = useState(defaultUserRef)
 
   return (
-    <section aria-labelledby="dev-heading" className="rounded-xl border border-slate-200 bg-white">
-      <h2 id="dev-heading">
-        <button
-          type="button"
-          onClick={() => setOpen((current) => !current)}
-          aria-expanded={open}
-          className="flex w-full items-center justify-between gap-4 p-4 text-left"
-        >
-          <span>
-            <span className="font-semibold text-slate-900">Developer panel</span>
-            <span className="mt-0.5 block text-sm text-slate-500">
-              Send signed partner events and inspect what the service did with them
-            </span>
-          </span>
-          <span aria-hidden="true" className="text-slate-400">
-            {open ? '−' : '+'}
-          </span>
-        </button>
+    <section aria-labelledby="dev-heading">
+      <h2 id="dev-heading" className="text-2xl font-semibold tracking-tight">
+        Developer panel
       </h2>
+      <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
+        Send signed partner events and inspect what the service did with them. Every button here
+        goes through the real webhook, signature and all.
+      </p>
 
-      {open && (
-        <div className="space-y-6 border-t border-slate-100 p-4">
-          <Simulator userRef={userRef} />
-          <Deliveries />
-          <Reconcile />
-        </div>
-      )}
+      {/* No longer collapsible: it was a section competing for space on a shared
+          page, and a page that opens collapsed is a page asking to be clicked
+          before it does anything. */}
+      <div className="mt-6 space-y-8">
+        <Simulator targetRef={targetRef} onTargetChange={setTargetRef} />
+        <RewardAdmin />
+        <Deliveries />
+        <Reconcile />
+      </div>
     </section>
   )
 }
@@ -70,15 +70,22 @@ const ACTIVITIES = [
   },
 ]
 
-function Simulator({ userRef }: { userRef: string | null }) {
+function Simulator({
+  targetRef,
+  onTargetChange,
+}: {
+  targetRef: string
+  onTargetChange: (ref: string) => void
+}) {
   const queryClient = useQueryClient()
   const { toast } = useToast()
   const [lastEventId, setLastEventId] = useState<string | null>(null)
+  const users = useQuery({ queryKey: ['demo-users'], queryFn: fetchUsers })
 
   const send = useMutation({
     mutationFn: (input: { activityType: string; eventId?: string }) =>
       simulateActivity({
-        userRef: userRef ?? '',
+        userRef: targetRef,
         activityType: input.activityType,
         ...(input.eventId === undefined ? {} : { eventId: input.eventId }),
       }),
@@ -126,17 +133,31 @@ function Simulator({ userRef }: { userRef: string | null }) {
 
   return (
     <div>
-      <h3 className="text-sm font-semibold tracking-wide text-slate-500 uppercase">
+      <h3 className="text-sm font-semibold tracking-wide text-slate-500 uppercase dark:text-slate-400">
         Simulate partner activity
       </h3>
-      <p className="mt-1 text-sm text-slate-600">
+      <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
         Signs a real payload with the partner secret and posts it to the webhook, exactly as the
         partner would.
       </p>
 
-      {!userRef && (
-        <p className="mt-3 text-sm text-amber-800">Choose a user above before sending events.</p>
-      )}
+      <div className="mt-3 flex items-center gap-2">
+        <label htmlFor="sim-target" className="text-sm text-slate-600 dark:text-slate-400">
+          Credit to
+        </label>
+        <select
+          id="sim-target"
+          value={targetRef}
+          onChange={(event) => onTargetChange(event.target.value)}
+          className="rounded-lg border border-slate-300 bg-white px-2 py-1 text-sm dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+        >
+          {users.data?.map((user) => (
+            <option key={user.id} value={user.externalRef}>
+              {user.displayName}
+            </option>
+          ))}
+        </select>
+      </div>
 
       <div className="mt-3 flex flex-wrap gap-2">
         {ACTIVITIES.map((activity) => (
@@ -144,9 +165,9 @@ function Simulator({ userRef }: { userRef: string | null }) {
             key={activity.type}
             type="button"
             title={activity.hint}
-            disabled={!userRef || send.isPending}
+            disabled={send.isPending}
             onClick={() => send.mutate({ activityType: activity.type })}
-            className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+            className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
           >
             {activity.label}
           </button>
@@ -163,7 +184,7 @@ function Simulator({ userRef }: { userRef: string | null }) {
           type="button"
           disabled={send.isPending}
           onClick={() => send.mutate({ activityType: 'PURCHASE', eventId: lastEventId })}
-          className="mt-3 rounded-lg border border-dashed border-slate-400 px-3 py-1.5 text-sm font-medium text-slate-600 transition hover:bg-slate-50 disabled:opacity-50"
+          className="mt-3 rounded-lg border border-dashed border-slate-400 px-3 py-1.5 text-sm font-medium text-slate-600 transition hover:bg-slate-50 disabled:opacity-50 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-800"
         >
           Replay the last event id (should credit nothing)
         </button>
@@ -177,12 +198,12 @@ function Deliveries() {
 
   return (
     <div>
-      <h3 className="text-sm font-semibold tracking-wide text-slate-500 uppercase">
+      <h3 className="text-sm font-semibold tracking-wide text-slate-500 uppercase dark:text-slate-400">
         Recent deliveries
       </h3>
 
       {deliveries.data && (
-        <p className="mt-1 text-sm text-slate-600">
+        <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
           {deliveries.data.summary.unmatched} of {deliveries.data.summary.total} parked as
           unmatched
           {deliveries.data.summary.noRule > 0 && ` · ${deliveries.data.summary.noRule} with no rule`}
@@ -191,15 +212,15 @@ function Deliveries() {
         </p>
       )}
 
-      <div className="mt-3 max-h-72 overflow-y-auto rounded-lg border border-slate-200">
-        <ul className="divide-y divide-slate-100">
+      <div className="mt-3 max-h-72 overflow-y-auto rounded-lg border border-slate-200 dark:border-slate-800">
+        <ul className="divide-y divide-slate-100 dark:divide-slate-800">
           {deliveries.data?.deliveries.map((delivery) => (
             <DeliveryRow key={delivery.id} delivery={delivery} />
           ))}
         </ul>
 
         {deliveries.data?.deliveries.length === 0 && (
-          <p className="p-4 text-sm text-slate-500">No deliveries yet.</p>
+          <p className="p-4 text-sm text-slate-500 dark:text-slate-400">No deliveries yet.</p>
         )}
       </div>
     </div>
@@ -210,13 +231,13 @@ function DeliveryRow({ delivery }: { delivery: Delivery }) {
   return (
     <li className="flex items-start justify-between gap-3 p-3 text-sm">
       <div className="min-w-0">
-        <p className="truncate font-mono text-xs text-slate-500">{delivery.externalEventId}</p>
-        <p className="mt-0.5 text-slate-700">
+        <p className="truncate font-mono text-xs text-slate-500 dark:text-slate-400">{delivery.externalEventId}</p>
+        <p className="mt-0.5 text-slate-700 dark:text-slate-300">
           {delivery.activityType ?? 'unknown activity'}
-          {delivery.userRef && <span className="text-slate-500"> · {delivery.userRef}</span>}
+          {delivery.userRef && <span className="text-slate-500 dark:text-slate-400"> · {delivery.userRef}</span>}
         </p>
-        {delivery.error && <p className="mt-0.5 text-xs text-slate-500">{delivery.error}</p>}
-        <p className="mt-0.5 text-xs text-slate-400">
+        {delivery.error && <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">{delivery.error}</p>}
+        <p className="mt-0.5 text-xs text-slate-400 dark:text-slate-500">
           {formatTimestamp(delivery.receivedAt)}
           {delivery.attempts > 1 && ` · seen ${delivery.attempts} times`}
         </p>
@@ -229,11 +250,16 @@ function DeliveryRow({ delivery }: { delivery: Delivery }) {
 
 function StatusBadge({ delivery }: { delivery: Delivery }) {
   const tone: Record<Delivery['status'], string> = {
-    PROCESSED: 'bg-emerald-50 text-emerald-700 ring-emerald-600/20',
-    UNMATCHED: 'bg-amber-50 text-amber-800 ring-amber-600/20',
-    REJECTED: 'bg-red-50 text-red-700 ring-red-600/20',
-    FAILED: 'bg-red-50 text-red-700 ring-red-600/20',
-    RECEIVED: 'bg-slate-100 text-slate-600 ring-slate-500/20',
+    PROCESSED:
+      'bg-emerald-50 text-emerald-700 ring-emerald-600/20 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-400/25',
+    UNMATCHED:
+      'bg-amber-50 text-amber-800 ring-amber-600/20 dark:bg-amber-500/10 dark:text-amber-300 dark:ring-amber-400/25',
+    REJECTED:
+      'bg-red-50 text-red-700 ring-red-600/20 dark:bg-red-500/10 dark:text-red-300 dark:ring-red-400/25',
+    FAILED:
+      'bg-red-50 text-red-700 ring-red-600/20 dark:bg-red-500/10 dark:text-red-300 dark:ring-red-400/25',
+    RECEIVED:
+      'bg-slate-100 text-slate-600 ring-slate-500/20 dark:bg-slate-800 dark:text-slate-300 dark:ring-slate-400/25',
   }
 
   // The reason is shown, not just the status: NO_RULE and UNKNOWN_USER are fixed
@@ -256,10 +282,10 @@ function Reconcile() {
 
   return (
     <div>
-      <h3 className="text-sm font-semibold tracking-wide text-slate-500 uppercase">
+      <h3 className="text-sm font-semibold tracking-wide text-slate-500 uppercase dark:text-slate-400">
         Ledger reconciliation
       </h3>
-      <p className="mt-1 text-sm text-slate-600">
+      <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
         Every cached balance compared against the sum of its ledger. Empty is healthy.
       </p>
 
@@ -267,8 +293,8 @@ function Reconcile() {
         <p
           className={`mt-3 rounded-lg border p-3 text-sm ${
             reconcile.data.healthy
-              ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
-              : 'border-red-200 bg-red-50 text-red-900'
+              ? 'border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900/60 dark:bg-emerald-950 dark:text-emerald-100'
+              : 'border-red-200 bg-red-50 text-red-900 dark:border-red-900/60 dark:bg-red-950 dark:text-red-100'
           }`}
         >
           {reconcile.data.healthy
@@ -278,7 +304,7 @@ function Reconcile() {
       )}
 
       {reconcile.data && !reconcile.data.healthy && (
-        <ul className="mt-2 space-y-1 text-sm text-slate-700">
+        <ul className="mt-2 space-y-1 text-sm text-slate-700 dark:text-slate-300">
           {reconcile.data.discrepancies.map((row) => (
             <li key={row.userId}>
               {row.displayName}: cached {row.cachedBalance}, ledger {row.ledgerBalance}

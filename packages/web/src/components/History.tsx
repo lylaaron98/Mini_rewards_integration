@@ -22,21 +22,33 @@ export function History({
   isFetchingMore,
   hasMore,
   onLoadMore,
+  heading = 'Activity',
 }: {
   entries: LedgerEntry[] | undefined
   isLoading: boolean
   isFetchingMore: boolean
   hasMore: boolean
   onLoadMore: () => void
+  /**
+   * Null when the page already has a heading of its own — two headings for one
+   * list is a duplicate landmark for a screen reader and visual noise for
+   * everyone else.
+   */
+  heading?: string | null
 }) {
   return (
-    <section aria-labelledby="history-heading" aria-busy={isLoading}>
-      <h2 id="history-heading" className="text-lg font-semibold text-slate-900">
-        Activity
-      </h2>
+    <section
+      {...(heading === null ? {} : { 'aria-labelledby': 'history-heading' })}
+      aria-busy={isLoading}
+    >
+      {heading !== null && (
+        <h2 id="history-heading" className="text-lg font-semibold text-slate-900 dark:text-slate-100">
+          {heading}
+        </h2>
+      )}
 
       {isLoading && (
-        <div className="mt-4 divide-y divide-slate-100 rounded-xl border border-slate-200 bg-white px-4">
+        <div className="mt-4 divide-y divide-slate-100 rounded-xl border border-slate-200 bg-white px-4 dark:divide-slate-800 dark:border-slate-800 dark:bg-slate-900">
           <SkeletonRows rows={5} />
         </div>
       )}
@@ -50,7 +62,7 @@ export function History({
 
       {!isLoading && entries && entries.length > 0 && (
         <>
-          <ol className="mt-4 divide-y divide-slate-100 rounded-xl border border-slate-200 bg-white">
+          <ol className="mt-4 divide-y divide-slate-100 rounded-xl border border-slate-200 bg-white dark:divide-slate-800 dark:border-slate-800 dark:bg-slate-900">
             {entries.map((entry) => (
               <Row key={entry.id} entry={entry} />
             ))}
@@ -61,14 +73,14 @@ export function History({
               type="button"
               onClick={onLoadMore}
               disabled={isFetchingMore}
-              className="mt-3 w-full rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:opacity-60"
+              className="mt-3 w-full rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:opacity-60 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
             >
               {isFetchingMore ? 'Loading…' : 'Load more'}
             </button>
           )}
 
           {!hasMore && entries.length > 15 && (
-            <p className="mt-3 text-center text-sm text-slate-500">That is the whole history.</p>
+            <p className="mt-3 text-center text-sm text-slate-500 dark:text-slate-400">That is the whole history.</p>
           )}
         </>
       )}
@@ -82,8 +94,8 @@ function Row({ entry }: { entry: LedgerEntry }) {
   return (
     <li className="flex items-start justify-between gap-4 px-4 py-3">
       <div className="min-w-0">
-        <p className="font-medium text-slate-900">{entry.description}</p>
-        <p className="mt-0.5 text-sm text-slate-500">
+        <p className="font-medium text-slate-900 dark:text-slate-100">{entry.description}</p>
+        <p className="mt-0.5 text-sm text-slate-500 dark:text-slate-400">
           <span>{describeType(entry.type)}</span>
           <span aria-hidden="true"> · </span>
           <span>{describeSource(entry)}</span>
@@ -94,7 +106,7 @@ function Row({ entry }: { entry: LedgerEntry }) {
           happened and exactly when", and a user comparing against a partner's
           records needs the actual moment.
         */}
-        <p className="mt-0.5 text-xs text-slate-400">
+        <p className="mt-0.5 text-xs text-slate-400 dark:text-slate-500">
           <time dateTime={entry.createdAt}>{formatTimestamp(entry.createdAt)}</time>
         </p>
       </div>
@@ -106,7 +118,7 @@ function Row({ entry }: { entry: LedgerEntry }) {
       */}
       <p
         className={`shrink-0 text-sm font-semibold tabular-nums ${
-          isCredit ? 'text-emerald-700' : 'text-slate-700'
+          isCredit ? 'text-emerald-700 dark:text-emerald-400' : 'text-slate-700 dark:text-slate-300'
         }`}
       >
         {formatDelta(entry.delta)}

@@ -1,169 +1,134 @@
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useCallback, useRef, useState } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
-import { Balance } from './components/Balance'
 import { DevPanel } from './components/DevPanel'
-import { History } from './components/History'
-import { RedeemDialog } from './components/RedeemDialog'
-import { Rewards } from './components/Rewards'
-import { UserSwitcher } from './components/UserSwitcher'
-import { fetchMe, fetchRewards, fetchTransactions, fetchUsers, redeemReward } from './lib/api'
-import type { Reward } from './lib/api'
-import { describeRedemptionError, describeRedemptionOutcome } from './lib/redemption-copy'
+import { Sidebar } from './components/Sidebar'
+import { SignIn } from './components/SignIn'
+import { ThemeToggle } from './components/ThemeToggle'
+import { fetchMe, fetchSession, logout } from './lib/api'
 import { useToast } from './lib/toast'
-import { useDemoUser } from './lib/use-demo-user'
+import { useRoute } from './lib/use-route'
+import { useTheme } from './lib/use-theme'
+import { ActivityPage } from './pages/ActivityPage'
+import { OverviewPage } from './pages/OverviewPage'
+import { RewardsPage } from './pages/RewardsPage'
 
+/**
+ * The shell: navigation, session, and whichever page the URL names.
+ *
+ * Each page owns its own data. The alternative — fetching everything here and
+ * threading it down — makes the shell grow a prop for every screen and couples
+ * pages that have nothing to do with each other. TanStack Query dedupes and
+ * caches by key, so two pages asking for the same thing cost one request.
+ */
 export function App() {
   const queryClient = useQueryClient()
   const { toast } = useToast()
-  const [externalRef, selectUser] = useDemoUser()
-  const [pendingReward, setPendingReward] = useState<Reward | null>(null)
+  const { theme, toggle: toggleTheme } = useTheme()
+  const { route, navigate } = useRoute()
 
   /**
-   * One idempotency key per redemption attempt, minted when the dialog opens.
+   * The session is the root of everything else.
    *
-   * A key generated inside the request function would be new on every retry, so
-   * a browser replaying a request after a flaky connection — or a user clicking
-   * twice — would become two purchases. Held in a ref rather than state because
-   * it must not trigger a render, and because the value read at submit time has
-   * to be the one minted at open time even if the component re-rendered in
-   * between.
+   * A 401 here is the normal signed-out state, not an error worth retrying — so
+   * retry is off and the failure is read as "nobody is signed in" rather than
+   * surfaced as something broken.
    */
-  const idempotencyKey = useRef<string | null>(null)
+  const session = useQuery({ queryKey: ['session'], queryFn: fetchSession, retry: false })
+  const signedIn = session.isSuccess
+  const isAdmin = session.data?.role === 'ADMIN'
 
-  const users = useQuery({ queryKey: ['users'], queryFn: fetchUsers })
+  // The balance is needed by the shop as well as the overview, so it is fetched
+  // here where both can reach it through the shared cache rather than twice.
+  const me = useQuery({ queryKey: ['me'], queryFn: fetchMe, enabled: signedIn })
 
-  const me = useQuery({
-    queryKey: ['me', externalRef],
-    queryFn: () => fetchMe(externalRef ?? ''),
-    enabled: externalRef !== null,
-  })
-
-  const rewards = useQuery({ queryKey: ['rewards'], queryFn: fetchRewards })
-
-  const transactions = useInfiniteQuery({
-    queryKey: ['transactions', externalRef],
-    queryFn: ({ pageParam }) => fetchTransactions(externalRef ?? '', pageParam),
-    initialPageParam: undefined as string | undefined,
-    getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
-    enabled: externalRef !== null,
-  })
-
-  const redeem = useMutation({
-    mutationFn: (reward: Reward) =>
-      redeemReward({
-        externalRef: externalRef ?? '',
-        rewardId: reward.id,
-        idempotencyKey: idempotencyKey.current ?? crypto.randomUUID(),
-      }),
-
-    onSuccess: (outcome) => {
-      // A 2xx does not mean the redemption succeeded — a failed fulfilment is a
-      // successful request reporting a failed outcome, and it has already been
-      // refunded. Saying so plainly is the difference between a user trusting
-      // the balance and going looking for lost points.
-      toast(describeRedemptionOutcome(outcome))
-      closeDialog()
-      void queryClient.invalidateQueries()
-    },
-
-    onError: (error: unknown) => {
-      toast({ tone: 'error', ...describeRedemptionError(error) })
-      closeDialog()
-      // The balance may be the reason this failed and may itself be stale.
-      void queryClient.invalidateQueries({ queryKey: ['me', externalRef] })
+  const signOut = useMutation({
+    mutationFn: logout,
+    onSettled: () => {
+      /**
+       * Everything cached belongs to the person who just left. Clearing rather
+       * than invalidating means the next user cannot see a flash of the previous
+       * one's balance while fresh data loads — a privacy failure, not a
+       * rendering artefact.
+       */
+      queryClient.clear()
+      toast({ tone: 'info', title: 'Signed out', detail: 'Your session has been ended.' })
     },
   })
 
-  const openDialog = useCallback((reward: Reward) => {
-    idempotencyKey.current = crypto.randomUUID()
-    setPendingReward(reward)
-  }, [])
+  if (session.isPending) {
+    // Nothing renders until the session is known. Showing the signed-in shell
+    // and swapping it for a sign-in form is a flicker that reads as a bug.
+    return (
+      <div className="min-h-screen bg-slate-50 dark:bg-slate-950">
+        <p className="py-24 text-center text-sm text-slate-500 dark:text-slate-400">Loading…</p>
+      </div>
+    )
+  }
 
-  const closeDialog = useCallback(() => {
-    setPendingReward(null)
-    idempotencyKey.current = null
-  }, [])
+  if (!signedIn) {
+    return (
+      <div className="min-h-screen bg-slate-50 px-4 py-16 dark:bg-slate-950">
+        <SignIn onSignedIn={() => void queryClient.invalidateQueries()} />
+      </div>
+    )
+  }
 
-  const entries = transactions.data?.pages.flatMap((page) => page.items)
   const balance = me.data?.balance ?? 0
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900">
-      <header className="border-b border-slate-200 bg-white">
-        <div className="mx-auto flex max-w-5xl flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
-          <div>
-            <h1 className="text-xl font-semibold tracking-tight">Mini Rewards</h1>
-            <p className="text-sm text-slate-500">Earn points from partner activity, spend them on rewards.</p>
-          </div>
+    <div className="min-h-screen bg-slate-50 text-slate-900 lg:flex dark:bg-slate-950 dark:text-slate-100">
+      <Sidebar route={route} isAdmin={isAdmin} onNavigate={navigate} />
 
-          <UserSwitcher users={users.data} selected={externalRef} onSelect={selectUser} />
-        </div>
-      </header>
-
-      <main className="mx-auto max-w-5xl space-y-6 px-4 py-6 sm:px-6 sm:py-8">
-        {externalRef === null ? (
-          <div className="rounded-xl border border-dashed border-slate-300 bg-white p-10 text-center">
-            <p className="font-medium">Choose a user to begin</p>
-            <p className="mx-auto mt-1 max-w-sm text-sm text-slate-600">
-              Authentication is stubbed for this exercise. Pick someone from the switcher above to
-              act as them.
-            </p>
-          </div>
-        ) : (
-          <>
-            <Balance
-              balance={me.data?.balance}
-              displayName={me.data?.displayName}
-              isLoading={me.isPending}
-            />
-
-            {me.isError && (
-              <p className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-900">
-                Could not load your balance. Is the API running?
+      {/* min-w-0 so a wide child — a long description, a table — shrinks inside
+          the flex row instead of pushing the layout sideways. */}
+      <div className="min-w-0 flex-1">
+        <header className="border-b border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+          <div className="mx-auto flex max-w-4xl items-center justify-between gap-4 px-4 py-4 sm:px-6">
+            <div>
+              <h1 className="text-lg font-semibold tracking-tight">Mini Rewards</h1>
+              <p className="text-sm text-slate-500 dark:text-slate-400">
+                Earn points from partner activity, spend them on rewards.
               </p>
-            )}
-
-            {/*
-              Two columns on desktop, stacked on mobile — and rewards first in
-              the source order, so a narrow screen shows what you can do before
-              what already happened.
-            */}
-            <div className="grid gap-6 lg:grid-cols-2">
-              <Rewards
-                rewards={rewards.data}
-                balance={balance}
-                isLoading={rewards.isPending}
-                pendingRewardId={redeem.isPending ? (pendingReward?.id ?? null) : null}
-                onRedeem={openDialog}
-              />
-
-              <History
-                entries={entries}
-                isLoading={transactions.isPending}
-                isFetchingMore={transactions.isFetchingNextPage}
-                hasMore={transactions.hasNextPage}
-                onLoadMore={() => void transactions.fetchNextPage()}
-              />
             </div>
-          </>
-        )}
 
-        <DevPanel userRef={externalRef} />
-      </main>
+            <div className="flex items-center gap-3">
+              <span className="hidden text-sm text-slate-600 sm:inline dark:text-slate-400">
+                {session.data.displayName}
+              </span>
+              <button
+                type="button"
+                onClick={() => signOut.mutate()}
+                disabled={signOut.isPending}
+                className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:opacity-60 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+              >
+                {signOut.isPending ? 'Signing out…' : 'Sign out'}
+              </button>
+              <ThemeToggle theme={theme} onToggle={toggleTheme} />
+            </div>
+          </div>
+        </header>
 
-      <RedeemDialog
-        reward={pendingReward}
-        balance={balance}
-        isPending={redeem.isPending}
-        onConfirm={() => pendingReward && redeem.mutate(pendingReward)}
-        onClose={() => {
-          // The native dialog fires `close` on Escape and on backdrop dismissal
-          // too, so this runs on every route out. Ignoring it mid-request would
-          // strand the key; the mutation's own handlers close it on completion.
-          if (!redeem.isPending) closeDialog()
-        }}
-      />
+        <main className="mx-auto max-w-4xl px-4 py-6 sm:px-6 sm:py-8">
+          {route === 'overview' && <OverviewPage onNavigate={navigate} />}
+          {route === 'rewards' && <RewardsPage balance={balance} />}
+          {route === 'activity' && <ActivityPage />}
+
+          {/*
+            Guarded here as well as in the nav. A URL is typed, pasted and
+            bookmarked, so hiding the link is not the same as refusing the page —
+            and the endpoints behind it enforce the same rule again on the
+            server, which is what actually protects them.
+          */}
+          {route === 'developer' &&
+            (isAdmin ? (
+              <DevPanel defaultUserRef={session.data.externalRef} />
+            ) : (
+              <p className="rounded-lg border border-slate-200 bg-white p-6 text-sm text-slate-600 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400">
+                This area is for administrator accounts.
+              </p>
+            ))}
+        </main>
+      </div>
     </div>
   )
 }

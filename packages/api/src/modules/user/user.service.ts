@@ -13,6 +13,19 @@ export type UserSummary = {
   displayName: string
 }
 
+/**
+ * A seeded account as the sign-in screen lists it.
+ *
+ * Includes the email so the screen can fill the form exactly rather than
+ * guessing it from a display name — which broke the moment an account was
+ * called "Dev Admin".
+ *
+ * Deliberately excludes the role. Publishing which account is privileged tells
+ * an attacker which password is worth guessing, and the screen has no use for
+ * it.
+ */
+export type DemoAccount = UserSummary & { email: string | null }
+
 export type MeResponse = UserSummary & {
   email: string | null
   balance: number
@@ -64,9 +77,9 @@ export async function getMe(tx: Tx, userId: string): Promise<MeResponse | null> 
  * lists every user in the system is not something to secure, it is something to
  * remove.
  */
-export async function listUsers(tx: Tx): Promise<UserSummary[]> {
+export async function listUsers(tx: Tx): Promise<DemoAccount[]> {
   return tx.user.findMany({
-    select: { id: true, externalRef: true, displayName: true },
+    select: { id: true, externalRef: true, displayName: true, email: true },
     orderBy: { displayName: 'asc' },
   })
 }

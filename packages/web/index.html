@@ -4,6 +4,28 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Mini Rewards</title>
+
+    <!--
+      Applies the theme before the first paint.
+
+      This has to run here, synchronously in the head, rather than in a React
+      effect. An effect runs after the first render, so a user who has chosen
+      dark would see a white page flash to dark on every single load — the
+      "flash of wrong theme", which looks broken and is entirely avoidable.
+
+      Wrapped in try/catch because localStorage throws outright in some
+      privacy configurations, and a theme preference is not worth a blank page.
+    -->
+    <script>
+      try {
+        var stored = localStorage.getItem('mini-rewards.theme')
+        var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
+        var dark = stored ? stored === 'dark' : prefersDark
+        document.documentElement.classList.toggle('dark', dark)
+      } catch (error) {
+        /* Falls back to light, which is the CSS default. */
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>

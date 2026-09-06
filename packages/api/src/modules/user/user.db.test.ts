@@ -6,7 +6,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 import { buildApp } from '../../app.js'
 import { prisma } from '../../lib/db.js'
-import { DEMO_USER_HEADER } from '../../plugins/auth.js'
+import { hashPassword } from '../auth/auth.service.js'
+import { loginAs } from '../auth/test-login.js'
 import { appendEntry } from '../ledger/ledger.service.js'
 
 /**
@@ -26,11 +27,31 @@ beforeAll(async () => {
 afterAll(async () => {
   await app.close()
   const testUsers = { user: { externalRef: { startsWith: TEST_PREFIX } } }
+  await prisma.session.deleteMany({ where: testUsers })
   await prisma.pointTransaction.deleteMany({ where: testUsers })
   await prisma.userBalance.deleteMany({ where: testUsers })
   await prisma.user.deleteMany({ where: { externalRef: { startsWith: TEST_PREFIX } } })
   await prisma.$disconnect()
 })
+
+const TEST_PASSWORD = 'test-password-1234'
+
+/** Creates an account with a known password and signs in as it. */
+async function createAccount(displayName: string): Promise<{ id: string; cookie: string }> {
+  const email = `${TEST_PREFIX}${randomUUID()}@example.test`
+  const user = await prisma.user.create({
+    data: {
+      externalRef: `${TEST_PREFIX}${randomUUID()}`,
+      displayName,
+      email,
+      passwordHash: await hashPassword(TEST_PASSWORD),
+    },
+    select: { id: true },
+  })
+
+  const { cookie } = await loginAs(app, email, TEST_PASSWORD)
+  return { id: user.id, cookie }
+}
 
 describe('GET /api/me', () => {
   /**
@@ -43,15 +64,11 @@ describe('GET /api/me', () => {
    * it comes back.
    */
   it('returns the acting user and their cached balance', async () => {
-    const externalRef = `${TEST_PREFIX}${randomUUID()}`
-    const user = await prisma.user.create({
-      data: { externalRef, displayName: 'Balance Reader', email: 'reader@example.com' },
-      select: { id: true },
-    })
+    const account = await createAccount('Balance Reader')
 
     await prisma.$transaction((tx) =>
       appendEntry(tx, {
-        userId: user.id,
+        userId: account.id,
         delta: 412,
         type: TransactionType.EARN,
         source: 'partner:test',
@@ -63,16 +80,11 @@ describe('GET /api/me', () => {
     const response = await app.inject({
       method: 'GET',
       url: '/api/me',
-      headers: { [DEMO_USER_HEADER]: externalRef },
+      headers: { cookie: account.cookie },
     })
 
     expect(response.statusCode).toBe(200)
-    expect(response.json()).toMatchObject({
-      externalRef,
-      displayName: 'Balance Reader',
-      email: 'reader@example.com',
-      balance: 412,
-    })
+    expect(response.json()).toMatchObject({ displayName: 'Balance Reader', balance: 412 })
   })
 
   /**
@@ -80,13 +92,12 @@ describe('GET /api/me', () => {
    * zero rather than as an error or a null.
    */
   it('reports zero for a user who has never earned anything', async () => {
-    const externalRef = `${TEST_PREFIX}${randomUUID()}`
-    await prisma.user.create({ data: { externalRef, displayName: 'Quiet User' } })
+    const account = await createAccount('Quiet User')
 
     const response = await app.inject({
       method: 'GET',
       url: '/api/me',
-      headers: { [DEMO_USER_HEADER]: externalRef },
+      headers: { cookie: account.cookie },
     })
 
     expect(response.statusCode).toBe(200)
@@ -94,24 +105,25 @@ describe('GET /api/me', () => {
 
     // The point of the case: no row exists, and that reads as zero rather than
     // as missing data.
-    const stored = await prisma.userBalance.findFirst({ where: { user: { externalRef } } })
+    const stored = await prisma.userBalance.findFirst({ where: { userId: account.id } })
     expect(stored).toBeNull()
   })
 
-  it('answers 401 without an acting user', async () => {
+  it('answers 401 without a session', async () => {
     const response = await app.inject({ method: 'GET', url: '/api/me' })
     expect(response.statusCode).toBe(401)
   })
 
   /**
-   * A header naming somebody we do not have is treated exactly like no header.
-   * Distinguishing them would let anyone probe which user references exist.
+   * A cookie carrying a token we have never issued is treated exactly like no
+   * cookie. Distinguishing them would confirm to an attacker which of their
+   * guesses had at some point been a real session.
    */
-  it('answers 401 for a header naming an unknown user', async () => {
+  it('answers 401 for a session token that was never issued', async () => {
     const response = await app.inject({
       method: 'GET',
       url: '/api/me',
-      headers: { [DEMO_USER_HEADER]: `${TEST_PREFIX}nobody` },
+      headers: { cookie: 'mini_rewards_session=not-a-real-token' },
     })
 
     expect(response.statusCode).toBe(401)

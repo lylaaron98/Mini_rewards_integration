@@ -79,22 +79,22 @@ export function RedeemDialog({
     <dialog
       ref={dialogRef}
       aria-labelledby="redeem-dialog-title"
-      className="m-auto w-[calc(100vw-2rem)] max-w-md rounded-xl border border-slate-200 bg-white p-0 text-slate-900 shadow-xl backdrop:backdrop-blur-[1px]"
+      className="m-auto w-[calc(100vw-2rem)] max-w-md rounded-xl border border-slate-200 bg-white p-0 text-slate-900 shadow-xl backdrop:backdrop-blur-[1px] dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
     >
       {reward && (
         <div className="p-6">
           <h2 id="redeem-dialog-title" className="text-lg font-semibold">
             Redeem {reward.name}?
           </h2>
-          <p className="mt-1 text-sm text-slate-600">{reward.description}</p>
+          <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">{reward.description}</p>
 
-          <dl className="mt-5 divide-y divide-slate-100 rounded-lg border border-slate-200">
+          <dl className="mt-5 divide-y divide-slate-100 rounded-lg border border-slate-200 dark:divide-slate-800 dark:border-slate-700">
             <Row label="Balance now" value={formatPoints(balance)} />
             <Row label="Cost" value={`−${formatPoints(reward.costPoints)}`} />
             <Row label="Balance after" value={formatPoints(balanceAfter)} emphasis />
           </dl>
 
-          <p className="mt-4 text-sm text-slate-500">
+          <p className="mt-4 text-sm text-slate-500 dark:text-slate-400">
             Redeeming spends your points immediately. This cannot be undone from here.
           </p>
 
@@ -103,7 +103,7 @@ export function RedeemDialog({
               type="button"
               onClick={onClose}
               disabled={isPending}
-              className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
+              className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
             >
               Cancel
             </button>
@@ -118,7 +118,7 @@ export function RedeemDialog({
               type="button"
               onClick={onConfirm}
               disabled={isPending}
-              className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+              className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-white"
             >
               {isPending ? 'Redeeming…' : `Redeem for ${formatPoints(reward.costPoints)}`}
             </button>
@@ -132,11 +132,11 @@ export function RedeemDialog({
 function Row({ label, value, emphasis }: { label: string; value: string; emphasis?: boolean }) {
   return (
     <div className="flex items-center justify-between px-4 py-2.5">
-      <dt className={`text-sm ${emphasis ? 'font-medium text-slate-900' : 'text-slate-600'}`}>
+      <dt className={`text-sm ${emphasis ? 'font-medium text-slate-900 dark:text-slate-100' : 'text-slate-600 dark:text-slate-400'}`}>
         {label}
       </dt>
       <dd
-        className={`text-sm tabular-nums ${emphasis ? 'font-semibold text-slate-900' : 'text-slate-700'}`}
+        className={`text-sm tabular-nums ${emphasis ? 'font-semibold text-slate-900 dark:text-slate-100' : 'text-slate-700 dark:text-slate-300'}`}
       >
         {value}
       </dd>

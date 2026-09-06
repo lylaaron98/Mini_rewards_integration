@@ -5,7 +5,11 @@ import { z } from 'zod'
 
 import { env } from '../../env.js'
 import { prisma } from '../../lib/db.js'
+import { requireAdmin } from '../../plugins/auth.js'
 import { reconcile } from '../ledger/ledger.service.js'
+import { RewardNotFoundError } from '../redemption/redemption.service.js'
+import { RewardSkuTakenError, createReward } from '../reward/reward.service.js'
+import { allocateReward } from './allocation.service.js'
 import { SIGNATURE_HEADER, TIMESTAMP_HEADER, sign } from '../webhook/signature.js'
 
 /**
@@ -33,7 +37,59 @@ const simulateSchema = z.object({
   eventId: z.string().min(1).optional(),
 })
 
+const createRewardSchema = z.object({
+  /**
+   * Constrained rather than free text. A SKU is an identifier other systems
+   * will key on, and one containing a space or a slash becomes a problem in a
+   * URL, a CSV export and a partner integration long after it was created.
+   */
+  sku: z.string().trim().min(2).max(40).regex(/^[A-Za-z0-9-]+$/, 'SKU may contain letters, numbers and hyphens only'),
+  name: z.string().trim().min(1).max(80),
+  description: z.string().trim().min(1).max(200),
+
+  /**
+   * Positive, matching the CHECK constraint on the table. A zero-cost reward
+   * would be free money, and a redemption of one would violate the ledger sign
+   * constraint far from the mistake, which was creating it.
+   */
+  costPoints: z.coerce.number().int().positive().max(1_000_000),
+
+  /** Null means unlimited, matching the column. */
+  stock: z.coerce.number().int().min(0).max(1_000_000).nullable().default(null),
+})
+
+const allocateSchema = z.object({
+  rewardId: z.string().uuid(),
+
+  /**
+   * At least one user, capped. An unbounded list would let one request hold the
+   * same stock row across hundreds of sequential transactions, and a cap is a
+   * cheaper answer than discovering that under load.
+   */
+  userIds: z.array(z.string().uuid()).min(1).max(100),
+
+  /**
+   * Supplied by the caller, exactly like the redemption route. A key minted
+   * server-side would be new on every retry, so a double-click would allocate
+   * twice — which is the failure it exists to prevent.
+   */
+  allocationKey: z.string().min(8).max(200),
+})
+
 export async function devRoutes(app: FastifyInstance): Promise<void> {
+  /**
+   * Every route in this plugin requires an ADMIN session.
+   *
+   * Applied once as a hook rather than per route, so a route added later is
+   * protected by default. Opting each one in individually means the guard is
+   * only ever as good as the memory of whoever adds the next endpoint.
+   *
+   * This is the real control. The UI hides the developer panel from ordinary
+   * users, which removes the temptation and not the capability — these URLs are
+   * documented in the README and anyone can call them directly.
+   */
+  app.addHook('preHandler', requireAdmin)
+
   /**
    * Signs a payload and posts it to the real webhook route.
    *
@@ -86,6 +142,69 @@ export async function devRoutes(app: FastifyInstance): Promise<void> {
       webhookStatus: response.statusCode,
       webhookResponse: response.json(),
     })
+  })
+
+  /**
+   * Adds a reward to the catalogue.
+   *
+   * Administrative rather than developer-only in spirit — a real deployment
+   * would have a catalogue screen behind the same role — but it lives here
+   * because that screen does not exist and this is where the admin tools are.
+   */
+  app.post('/rewards', async (request, reply) => {
+    const body = createRewardSchema.safeParse(request.body)
+
+    if (!body.success) {
+      return reply.status(400).send({
+        error: 'invalid_request',
+        message: body.error.issues.map((issue) => issue.message).join('; '),
+      })
+    }
+
+    try {
+      const reward = await prisma.$transaction((tx) => createReward(tx, body.data))
+      return reply.status(201).send(reward)
+    } catch (error) {
+      if (error instanceof RewardSkuTakenError) {
+        return reply.status(409).send({ error: error.code, message: error.message })
+      }
+      throw error
+    }
+  })
+
+  /**
+   * Allocates one reward to one or many users.
+   *
+   * Each user gets an independent outcome: one person being unreachable — out of
+   * stock, or too far in debt for the credit to cover the cost — must not
+   * abandon the rest, and the operator needs to know exactly who missed out.
+   * So this answers 200 with a per-user result rather than a single status that
+   * would have to lie about a partial success.
+   */
+  app.post('/allocate', async (request, reply) => {
+    const body = allocateSchema.safeParse(request.body)
+
+    if (!body.success) {
+      return reply.status(400).send({
+        error: 'invalid_request',
+        message: body.error.issues.map((issue) => issue.message).join('; '),
+      })
+    }
+
+    try {
+      const outcomes = await allocateReward(prisma, body.data)
+
+      return reply.send({
+        allocated: outcomes.filter((outcome) => outcome.status === 'ALLOCATED').length,
+        failed: outcomes.filter((outcome) => outcome.status === 'FAILED').length,
+        outcomes,
+      })
+    } catch (error) {
+      if (error instanceof RewardNotFoundError) {
+        return reply.status(404).send({ error: error.code, message: 'No such reward.' })
+      }
+      throw error
+    }
   })
 
   /**

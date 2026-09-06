@@ -63,6 +63,17 @@ const environmentSchema = z.object({
    * to retry rather than to give up.
    */
   RATE_LIMIT_MAX: z.coerce.number().int().positive().default(120),
+
+  /**
+   * Login and registration attempts per minute.
+   *
+   * Far tighter than the rest of the API, because this is where an attacker
+   * guesses. Ten a minute is invisible to someone typing their own password
+   * and ruinous to a dictionary. Configurable rather than hard-coded so the
+   * test suite, which signs in dozens of accounts, is not throttled by a
+   * defence aimed at somebody else.
+   */
+  AUTH_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(10),
   WEBHOOK_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(1200),
 })
 

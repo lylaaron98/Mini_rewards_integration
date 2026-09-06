@@ -29,7 +29,8 @@ pnpm db:seed        # loads the development dataset
 pnpm dev            # API on :3000, web on :5173
 ```
 
-Open <http://localhost:5173> and pick a user from the switcher.
+Open <http://localhost:5173> and sign in. The sign-in screen lists the seeded demo accounts
+with a button that fills the form in for you.
 
 > **On Windows**, the two dev servers bind different address families. This only affects
 > command-line tools — browsers fall back automatically:
@@ -43,9 +44,11 @@ Open <http://localhost:5173> and pick a user from the switcher.
 
 ## Start with the developer panel
 
-Most of what this service does happens behind a signed webhook. The panel at the bottom of
-the page is how to see it without hand-crafting an HMAC — every button signs a real payload
-and posts it to the real webhook route:
+Sign in as **admin@example.com** — the panel is visible to administrator accounts only.
+
+Most of what this service does happens behind a signed webhook, and the panel at the bottom
+of the page is how to see it without hand-crafting an HMAC. Every button signs a real payload
+and posts it to the real webhook route, crediting whichever account you pick in the panel:
 
 | Button | What it demonstrates |
 | --- | --- |
@@ -107,11 +110,24 @@ silently rewriting a balance would destroy the evidence of whatever wrote it wro
 
 ## Seeded data
 
-| User | Balance | What they exercise |
+| Account | Balance | What they exercise |
 | --- | --- | --- |
 | Ada Lovelace | 355 | Purchases priced by two rule versions, a fulfilled redemption, and one that failed and was reversed |
 | Grace Hopper | 515 | A smaller history, so switching users shows different data |
 | Alan Turing | 0 | The empty state — a real screen, and the one most likely to be broken by nobody looking at it |
+| Dev Admin | 0 | The only account that can see the developer panel |
+
+Sign in as `ada@example.com`, `grace@example.com`, `alan@example.com` or
+`admin@example.com`, all with the password `demo1234`. The sign-in screen lists them with a
+**Use** button that fills the form in, so there is nothing to copy by hand. You can also
+create your own account — it starts at zero points, and the administrator can credit it from
+the developer panel.
+
+The developer panel is visible **only to `admin@example.com`**, and that is enforced on the
+server: every `/api/dev/*` route requires an `ADMIN` session and answers `403` otherwise. So
+hiding the panel in the UI removes the temptation rather than the capability. Because an
+administrator has no history of their own, the panel lets them choose which account the
+simulated activity is credited to.
 
 Plus three deliveries that produced no ledger entry (one `UNMATCHED` per reason, one
 `REJECTED` with a malformed payload) and rewards from 50 to 25,000 points, so both a
@@ -124,19 +140,33 @@ always produces the same state.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | POST | `/api/webhooks/:partner` | Partner activity. HMAC-signed; see above |
-| GET | `/api/me` | Acting user and balance. Needs `X-Demo-User` |
+| POST | `/api/auth/register` | Create an account. Signs in on success |
+| POST | `/api/auth/login` | Sign in. Sets an httpOnly session cookie |
+| POST | `/api/auth/logout` | Revokes the session server-side |
+| GET | `/api/auth/me` | The signed-in account and its role |
+| GET | `/api/me` | Balance and profile. Requires a session |
 | GET | `/api/me/transactions` | Ledger history, cursor-paginated. `?cursor=&limit=&type=` |
 | GET | `/api/rewards` | Catalogue, cheapest first, with `inStock` |
-| POST | `/api/redemptions` | Redeem. Needs `X-Demo-User` and `Idempotency-Key` |
-| GET | `/api/demo/users` | Users for the switcher. Stub auth only |
+| POST | `/api/redemptions` | Redeem. Requires a session and `Idempotency-Key` |
+| GET | `/api/demo/users` | Seeded accounts for the sign-in screen. Demo only |
 | GET | `/api/health/live` | Liveness. Touches nothing external |
 | GET | `/api/health/ready` | Readiness. 200 if the database answers, else 503 |
-| POST | `/api/dev/simulate-activity` | Signs a real payload and posts it to the webhook |
-| GET | `/api/dev/deliveries` | Recent deliveries, including parked ones |
-| GET | `/api/dev/reconcile` | Balances vs. ledger. Empty is healthy |
+| POST | `/api/dev/simulate-activity` | Signs a real payload and posts it to the webhook. **Admin** |
+| GET | `/api/dev/deliveries` | Recent deliveries, including parked ones. **Admin** |
+| GET | `/api/dev/reconcile` | Balances vs. ledger. Empty is healthy. **Admin** |
 
-`/api/dev/*` is registered only when `NODE_ENV !== 'production'`, so those routes do not
-exist in a real deployment rather than existing behind a flag.
+`/api/dev/*` is guarded twice over: the routes are registered only when
+`NODE_ENV !== 'production'`, so they do not exist in a real deployment, and every one of them
+requires an `ADMIN` session — `401` when signed out, `403` when signed in as an ordinary
+user. The guard is a plugin-level hook rather than a per-route option, so a route added later
+is protected without anyone having to remember.
+
+Sessions are an httpOnly cookie carrying a random token; the database stores only its
+SHA-256. JavaScript cannot read the cookie, so an XSS bug cannot exfiltrate a session, and a
+stolen database yields nothing that can be presented back. Logging out deletes the row, so a
+copied cookie stops working immediately rather than at expiry. Passwords are hashed with
+scrypt from Node's standard library — memory-hard, and no native module for a reviewer to
+compile.
 
 Errors share one envelope, `{ error, message }`, where `error` is a machine-readable code.
 

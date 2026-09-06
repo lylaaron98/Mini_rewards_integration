@@ -2,6 +2,7 @@ import { TransactionType } from '@prisma/client'
 
 import { prisma } from './lib/db.js'
 import type { Tx } from './lib/db.js'
+import { hashPassword } from './modules/auth/auth.service.js'
 import { REVERSAL_SOURCE, appendEntry, reconcile } from './modules/ledger/ledger.service.js'
 import { resolveDeliveryKey } from './modules/webhook/webhook.service.js'
 import {
@@ -10,6 +11,7 @@ import {
   SEED_EARNING_RULES,
   SEED_HISTORY,
   SEED_ORPHAN_DELIVERIES,
+  SEED_PASSWORD,
   SEED_REWARDS,
   SEED_USERS,
 } from './seed-data.js'
@@ -46,6 +48,7 @@ async function seed(tx: Tx): Promise<void> {
   // this ordering fails loudly instead of leaving dangling references.
   await tx.pointTransaction.deleteMany()
   await tx.redemption.deleteMany()
+  await tx.session.deleteMany()
   await tx.userBalance.deleteMany()
   await tx.webhookDelivery.deleteMany()
   await tx.earningRule.deleteMany()
@@ -54,9 +57,24 @@ async function seed(tx: Tx): Promise<void> {
 
   // --- Reference data -------------------------------------------------------
 
+  /**
+   * Every seeded account shares one password, hashed properly rather than
+   * stored as-is — the seed goes through the same `hashPassword` the
+   * registration route uses, so logging in as a seeded user exercises the real
+   * verification path rather than a shortcut that only works here.
+   *
+   * Hashed once and reused across the three users. scrypt is deliberately slow,
+   * and doing it per user would add most of a second to every seed for no
+   * benefit, since the password is identical and the salt is inside the hash.
+   */
+  const seededPasswordHash = await hashPassword(SEED_PASSWORD)
+
   const userIdByRef = new Map<string, string>()
   for (const user of SEED_USERS) {
-    const created = await tx.user.create({ data: user, select: { id: true } })
+    const created = await tx.user.create({
+      data: { ...user, passwordHash: seededPasswordHash },
+      select: { id: true },
+    })
     userIdByRef.set(user.externalRef, created.id)
   }
 

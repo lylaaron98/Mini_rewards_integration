@@ -19,8 +19,20 @@ export const LEDGER_SOURCE = `partner:${PARTNER}`
 export type SeedUser = {
   externalRef: string
   displayName: string
-  email: string | null
+  email: string
+  /** Defaults to USER. Exactly one seeded account is an administrator. */
+  role?: 'USER' | 'ADMIN'
 }
+
+/**
+ * The password every seeded account shares.
+ *
+ * Printed on the login screen and in the README, because a reviewer should not
+ * have to hunt for credentials to see the app. It is seed data for a local
+ * development database and nothing else — the production path never runs this
+ * script, which truncates every table before it inserts.
+ */
+export const SEED_PASSWORD = 'demo1234'
 
 export const SEED_USERS: SeedUser[] = [
   { externalRef: 'acme-user-001', displayName: 'Ada Lovelace', email: 'ada@example.com' },
@@ -29,7 +41,23 @@ export const SEED_USERS: SeedUser[] = [
   // Deliberately left with no activity at all. An empty state is a real screen
   // that real users see on day one, and it is the one most likely to be broken
   // because nobody has any data to notice it with.
-  { externalRef: 'acme-user-003', displayName: 'Alan Turing', email: null },
+  { externalRef: 'acme-user-003', displayName: 'Alan Turing', email: 'alan@example.com' },
+
+  /**
+   * The administrator, and a separate account on purpose.
+   *
+   * Making Ada an admin would have been more convenient and would have hidden
+   * the distinction entirely — the developer panel would simply always be
+   * there. A fourth account means signing in as an ordinary user and as an
+   * administrator produce visibly different applications, which is the point
+   * being demonstrated.
+   */
+  {
+    externalRef: 'local:seed-admin',
+    displayName: 'Dev Admin',
+    email: 'admin@example.com',
+    role: 'ADMIN',
+  },
 ]
 
 // ---------------------------------------------------------------------------

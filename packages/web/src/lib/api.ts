@@ -35,6 +35,15 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
 
   const response = await fetch(path, {
     method,
+    /**
+     * The session lives in an httpOnly cookie, which JavaScript cannot read —
+     * so the browser has to be told to attach it.
+     *
+     * `same-origin` rather than `include`: everything reaches the API through
+     * the Vite proxy on a single origin, and `include` would attach credentials
+     * to any cross-origin request a future change happened to introduce.
+     */
+    credentials: 'same-origin',
     headers: {
       ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
       ...headers,
@@ -76,10 +85,13 @@ export type HealthReport = {
   error?: string
 }
 
+export type UserRole = 'USER' | 'ADMIN'
+
 export type UserSummary = {
   id: string
   externalRef: string
   displayName: string
+  role: UserRole
 }
 
 export type Me = UserSummary & {
@@ -165,41 +177,72 @@ export type SimulateResponse = {
 // Calls
 // ---------------------------------------------------------------------------
 
-/** The stubbed auth seam. See plugins/auth.ts on the server. */
-const DEMO_USER_HEADER = 'X-Demo-User'
-
-const asUser = (externalRef: string) => ({ [DEMO_USER_HEADER]: externalRef })
-
 export function fetchHealth(): Promise<HealthReport> {
   return apiRequest<HealthReport>('/api/health/ready')
 }
 
-export function fetchUsers(): Promise<UserSummary[]> {
-  return apiRequest<UserSummary[]>('/api/demo/users')
+/**
+ * A seeded demo account, as the sign-in screen lists it.
+ *
+ * No : the endpoint deliberately does not publish which account is
+ * privileged, so this type must not claim it does.
+ */
+export type DemoAccount = {
+  id: string
+  externalRef: string
+  displayName: string
+  email: string | null
 }
 
-export function fetchMe(externalRef: string): Promise<Me> {
-  return apiRequest<Me>('/api/me', { headers: asUser(externalRef) })
+/**
+ * The demo accounts, listed on the sign-in screen so a reviewer can get in
+ * without hunting for credentials. Available without a session, which is the
+ * point — it is what you read before you have one.
+ */
+export function fetchUsers(): Promise<DemoAccount[]> {
+  return apiRequest<DemoAccount[]>('/api/demo/users')
+}
+
+export function login(email: string, password: string): Promise<UserSummary> {
+  return apiRequest<UserSummary>('/api/auth/login', {
+    method: 'POST',
+    body: { email, password },
+  })
+}
+
+export function registerAccount(input: {
+  email: string
+  password: string
+  displayName: string
+}): Promise<UserSummary> {
+  return apiRequest<UserSummary>('/api/auth/register', { method: 'POST', body: input })
+}
+
+export function logout(): Promise<void> {
+  return apiRequest<void>('/api/auth/logout', { method: 'POST' })
+}
+
+/** Who the session belongs to, for restoring state on load. */
+export function fetchSession(): Promise<UserSummary> {
+  return apiRequest<UserSummary>('/api/auth/me')
+}
+
+export function fetchMe(): Promise<Me> {
+  return apiRequest<Me>('/api/me')
 }
 
 export function fetchRewards(): Promise<Reward[]> {
   return apiRequest<Reward[]>('/api/rewards')
 }
 
-export function fetchTransactions(
-  externalRef: string,
-  cursor?: string,
-): Promise<TransactionPage> {
+export function fetchTransactions(cursor?: string): Promise<TransactionPage> {
   const query = new URLSearchParams({ limit: '15' })
   if (cursor) query.set('cursor', cursor)
 
-  return apiRequest<TransactionPage>(`/api/me/transactions?${query.toString()}`, {
-    headers: asUser(externalRef),
-  })
+  return apiRequest<TransactionPage>(`/api/me/transactions?${query.toString()}`)
 }
 
 export function redeemReward(input: {
-  externalRef: string
   rewardId: string
   idempotencyKey: string
 }): Promise<RedemptionOutcome> {
@@ -207,7 +250,6 @@ export function redeemReward(input: {
     method: 'POST',
     body: { rewardId: input.rewardId },
     headers: {
-      ...asUser(input.externalRef),
       /**
        * Generated once per redemption attempt by the caller, never here. If this
        * function minted the key, every retry would carry a fresh one and each
@@ -229,6 +271,43 @@ export function simulateActivity(input: {
     method: 'POST',
     body: input,
   })
+}
+
+export type AllocationOutcome = {
+  userId: string
+  displayName: string
+  status: 'ALLOCATED' | 'FAILED'
+  reason?: string
+}
+
+export type AllocationResult = {
+  allocated: number
+  failed: number
+  outcomes: AllocationOutcome[]
+}
+
+export function createReward(input: {
+  sku: string
+  name: string
+  description: string
+  costPoints: number
+  stock: number | null
+}): Promise<Reward> {
+  return apiRequest<Reward>('/api/dev/rewards', { method: 'POST', body: input })
+}
+
+export function allocateReward(input: {
+  rewardId: string
+  userIds: string[]
+  /**
+   * Minted once per allocation attempt by the caller, never here — the same
+   * reason the redemption call does not mint its own. A key generated inside
+   * this function would be new on every retry, so a double-click would allocate
+   * twice.
+   */
+  allocationKey: string
+}): Promise<AllocationResult> {
+  return apiRequest<AllocationResult>('/api/dev/allocate', { method: 'POST', body: input })
 }
 
 export function fetchDeliveries(): Promise<DeliveriesResponse> {

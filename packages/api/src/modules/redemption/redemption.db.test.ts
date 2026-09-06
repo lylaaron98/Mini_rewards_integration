@@ -6,7 +6,8 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import { buildApp } from '../../app.js'
 import { prisma } from '../../lib/db.js'
-import { DEMO_USER_HEADER } from '../../plugins/auth.js'
+import { hashPassword } from '../auth/auth.service.js'
+import { loginAs } from '../auth/test-login.js'
 import { appendEntry, reconcile } from '../ledger/ledger.service.js'
 import * as fulfillment from './fulfillment.js'
 import { redeem } from './redemption.service.js'
@@ -35,6 +36,7 @@ afterAll(async () => {
   await app.close()
 
   const testUsers = { user: { externalRef: { startsWith: TEST_PREFIX } } }
+  await prisma.session.deleteMany({ where: testUsers })
   await prisma.pointTransaction.deleteMany({ where: testUsers })
   await prisma.redemption.deleteMany({ where: testUsers })
   await prisma.userBalance.deleteMany({ where: testUsers })
@@ -43,10 +45,23 @@ afterAll(async () => {
   await prisma.$disconnect()
 })
 
-async function createUser(points: number): Promise<{ id: string; externalRef: string }> {
+const TEST_PASSWORD = 'test-password-1234'
+
+/**
+ * Creates an account, credits it, and signs in — returning the session cookie
+ * rather than a header a middleware trusts, so every request in this suite is
+ * authenticated the way a browser authenticates.
+ */
+async function createUser(points: number): Promise<{ id: string; cookie: string }> {
   const externalRef = `${TEST_PREFIX}${randomUUID()}`
+  const email = `${TEST_PREFIX}${randomUUID()}@example.test`
   const user = await prisma.user.create({
-    data: { externalRef, displayName: 'Redemption Test User' },
+    data: {
+      externalRef,
+      email,
+      displayName: 'Redemption Test User',
+      passwordHash: await hashPassword(TEST_PASSWORD),
+    },
     select: { id: true },
   })
 
@@ -63,7 +78,8 @@ async function createUser(points: number): Promise<{ id: string; externalRef: st
     )
   }
 
-  return { id: user.id, externalRef }
+  const { cookie } = await loginAs(app, email, TEST_PASSWORD)
+  return { id: user.id, cookie }
 }
 
 async function createReward(costPoints: number, stock: number | null): Promise<string> {
@@ -80,12 +96,12 @@ async function createReward(costPoints: number, stock: number | null): Promise<s
   return reward.id
 }
 
-function post(externalRef: string, rewardId: string, idempotencyKey: string) {
+function post(cookie: string, rewardId: string, idempotencyKey: string) {
   return app.inject({
     method: 'POST',
     url: '/api/redemptions',
     headers: {
-      [DEMO_USER_HEADER]: externalRef,
+      cookie,
       'idempotency-key': idempotencyKey,
       'content-type': 'application/json',
     },
@@ -98,7 +114,7 @@ describe('redemption happy path', () => {
     const user = await createUser(500)
     const rewardId = await createReward(200, 5)
 
-    const response = await post(user.externalRef, rewardId, randomUUID())
+    const response = await post(user.cookie, rewardId, randomUUID())
 
     expect(response.statusCode).toBe(201)
     expect(response.json()).toMatchObject({
@@ -120,7 +136,7 @@ describe('redemption happy path', () => {
     const user = await createUser(500)
     const rewardId = await createReward(50, null)
 
-    await post(user.externalRef, rewardId, randomUUID())
+    await post(user.cookie, rewardId, randomUUID())
 
     const reward = await prisma.reward.findUniqueOrThrow({ where: { id: rewardId } })
     expect(reward.stock).toBeNull()
@@ -132,7 +148,7 @@ describe('redemption refusals', () => {
     const user = await createUser(100)
     const rewardId = await createReward(750, 5)
 
-    const response = await post(user.externalRef, rewardId, randomUUID())
+    const response = await post(user.cookie, rewardId, randomUUID())
 
     expect(response.statusCode).toBe(409)
     expect(response.json()).toMatchObject({
@@ -152,7 +168,7 @@ describe('redemption refusals', () => {
     const user = await createUser(500)
     const rewardId = await createReward(100, 0)
 
-    const response = await post(user.externalRef, rewardId, randomUUID())
+    const response = await post(user.cookie, rewardId, randomUUID())
 
     expect(response.statusCode).toBe(409)
     expect(response.json()).toMatchObject({ error: 'out_of_stock' })
@@ -165,7 +181,7 @@ describe('redemption refusals', () => {
     const response = await app.inject({
       method: 'POST',
       url: '/api/redemptions',
-      headers: { [DEMO_USER_HEADER]: user.externalRef, 'content-type': 'application/json' },
+      headers: { cookie: user.cookie, 'content-type': 'application/json' },
       payload: { rewardId },
     })
 
@@ -173,7 +189,7 @@ describe('redemption refusals', () => {
     expect(response.json()).toMatchObject({ error: 'idempotency_key_required' })
   })
 
-  it('requires an acting user', async () => {
+  it('requires a signed-in user', async () => {
     const rewardId = await createReward(100, 5)
 
     const response = await app.inject({
@@ -197,8 +213,8 @@ describe('redemption idempotency', () => {
     const rewardId = await createReward(200, 5)
     const key = randomUUID()
 
-    const first = await post(user.externalRef, rewardId, key)
-    const second = await post(user.externalRef, rewardId, key)
+    const first = await post(user.cookie, rewardId, key)
+    const second = await post(user.cookie, rewardId, key)
 
     expect(first.statusCode).toBe(201)
     expect(second.statusCode).toBe(200)
@@ -227,8 +243,8 @@ describe('redemption idempotency', () => {
     const key = randomUUID()
 
     const [first, second] = await Promise.all([
-      post(user.externalRef, rewardId, key),
-      post(user.externalRef, rewardId, key),
+      post(user.cookie, rewardId, key),
+      post(user.cookie, rewardId, key),
     ])
 
     const codes = [first.statusCode, second.statusCode].sort()
@@ -265,12 +281,12 @@ describe('redemption idempotency survives catalogue changes', () => {
     const rewardId = await createReward(200, 5)
     const key = randomUUID()
 
-    const first = await post(user.externalRef, rewardId, key)
+    const first = await post(user.cookie, rewardId, key)
     expect(first.statusCode).toBe(201)
 
     await prisma.reward.update({ where: { id: rewardId }, data: { active: false } })
 
-    const replay = await post(user.externalRef, rewardId, key)
+    const replay = await post(user.cookie, rewardId, key)
 
     expect(replay.statusCode).toBe(200)
     expect(replay.json()).toMatchObject({
@@ -289,12 +305,12 @@ describe('redemption idempotency survives catalogue changes', () => {
     const rewardId = await createReward(200, null)
     const key = randomUUID()
 
-    const first = await post(user.externalRef, rewardId, key)
+    const first = await post(user.cookie, rewardId, key)
     expect(first.statusCode).toBe(201)
 
     await prisma.redemption.updateMany({ where: { rewardId }, data: { rewardId } })
 
-    const replay = await post(user.externalRef, rewardId, key)
+    const replay = await post(user.cookie, rewardId, key)
     expect(replay.statusCode).toBe(200)
     expect(replay.json().redemptionId).toBe(first.json().redemptionId)
   })
@@ -314,7 +330,7 @@ describe('redemption under concurrency', () => {
     const rewardId = await createReward(200, 50)
 
     const responses = await Promise.all(
-      Array.from({ length: 20 }, () => post(user.externalRef, rewardId, randomUUID())),
+      Array.from({ length: 20 }, () => post(user.cookie, rewardId, randomUUID())),
     )
 
     const created = responses.filter((response) => response.statusCode === 201)
@@ -345,7 +361,7 @@ describe('redemption under concurrency', () => {
     const users = await Promise.all(Array.from({ length: 10 }, () => createUser(500)))
 
     const responses = await Promise.all(
-      users.map((user) => post(user.externalRef, rewardId, randomUUID())),
+      users.map((user) => post(user.cookie, rewardId, randomUUID())),
     )
 
     expect(responses.filter((r) => r.statusCode === 201)).toHaveLength(1)

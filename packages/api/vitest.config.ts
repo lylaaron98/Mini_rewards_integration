@@ -34,6 +34,7 @@ export default defineConfig({
       // test, which builds an app with a limit of two; throttling every other
       // suite would only make them flaky.
       RATE_LIMIT_MAX: '100000',
+      AUTH_RATE_LIMIT_MAX: '100000',
       WEBHOOK_RATE_LIMIT_MAX: '100000',
       WEBHOOK_PARTNER: 'acme',
       WEBHOOK_SECRET: 'test-webhook-signing-secret',

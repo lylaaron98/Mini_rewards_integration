@@ -1,38 +1,35 @@
+import type { UserRole } from '@prisma/client'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 
 import { prisma } from '../lib/db.js'
+import { SESSION_COOKIE, resolveSession } from '../modules/auth/auth.service.js'
 
 /**
- * Authentication, stubbed on purpose.
+ * Authentication.
  *
- * An `X-Demo-User` header naming a user's external reference selects who is
- * acting. There are no passwords, no sessions, no tokens, and anyone who can
- * reach the API can act as anyone. That is a conscious cut, not an oversight:
- * building real authentication would have consumed the time that went into the
- * ledger and the redemption path, and it would have demonstrated nothing about
- * the problem this exercise is actually about.
+ * This file was a stub — an `X-Demo-User` header naming whoever you claimed to
+ * be — and replacing it with real sessions changed only this file plus the
+ * routes that issue them. Every route still reads `request.user` and none of
+ * them knows where it came from, which was the entire point of putting the seam
+ * here in the first place.
  *
- * What matters is that it is a SINGLE SEAM. Every route reads `request.user` and
- * no route knows where that came from. Replacing this with real sessions means
- * changing the `resolveUser` hook below and nothing else — the routes, the
- * services and the tests are all already written against the seam rather than
- * against the header.
- *
- * The demo switcher in the UI is the visible consequence: it sets this header,
- * which is why switching users is instant and why it must never ship.
+ * The session token arrives in an httpOnly cookie, so no script on the page can
+ * read it and an XSS bug cannot exfiltrate a session. It is looked up on every
+ * request rather than trusted from the cookie's contents: the cookie carries an
+ * opaque random token, and the database holds only its hash, so a stolen
+ * database yields nothing anyone can present back.
  */
-
-export const DEMO_USER_HEADER = 'x-demo-user'
 
 export type AuthenticatedUser = {
   id: string
   externalRef: string
   displayName: string
+  role: UserRole
 }
 
 declare module 'fastify' {
   interface FastifyRequest {
-    /** The acting user, or null when the request carried no valid identity. */
+    /** The acting user, or null when the request carried no valid session. */
     user: AuthenticatedUser | null
   }
 }
@@ -50,38 +47,70 @@ export function applyAuth(app: FastifyInstance): void {
   app.decorateRequest('user', null)
 
   app.addHook('preHandler', async (request) => {
-    const header = request.headers[DEMO_USER_HEADER]
-    const externalRef = typeof header === 'string' ? header : undefined
+    const token = request.cookies[SESSION_COOKIE]
 
-    if (!externalRef) {
+    if (!token) {
       request.user = null
       return
     }
 
-    // Looked up every request rather than trusted from the header, so a header
-    // naming a deleted or non-existent user resolves to nobody instead of to a
-    // half-populated object that fails later, further from the cause.
-    const user = await prisma.user.findUnique({
-      where: { externalRef },
-      select: { id: true, externalRef: true, displayName: true },
-    })
-
-    request.user = user
+    // Looked up every request rather than cached in the cookie, which is what
+    // makes logout immediate: revoking the row ends the session on the very next
+    // request rather than whenever a token would have expired.
+    request.user = await resolveSession(prisma, token)
   })
 }
 
 /**
  * Route-level guard. Answers 401 when there is no acting user.
  *
- * Deliberately does not distinguish "no header" from "header names someone we
- * do not have" — both mean the same thing to the caller, and telling them apart
- * would let anyone probe which user references exist.
+ * Deliberately does not distinguish "no cookie" from "session expired or
+ * revoked" — both mean the same thing to the caller, which is: log in again.
  */
 export async function requireUser(request: FastifyRequest, reply: FastifyReply): Promise<void> {
   if (!request.user) {
     await reply.status(401).send({
       error: 'unauthenticated',
-      message: `Send a valid ${DEMO_USER_HEADER} header identifying the acting user.`,
+      message: 'Sign in to continue.',
+    })
+  }
+}
+
+/**
+ * Route-level guard for administrative endpoints.
+ *
+ * Checked on the server, on every request, from the session — never from
+ * anything the client sends. The UI hides the developer panel from ordinary
+ * users, and that is presentation only: hiding a button removes the temptation,
+ * not the capability, and anyone can call the endpoint directly.
+ *
+ * 403 rather than 404. Concealing the route's existence would be worth doing if
+ * the URLs were secret, and they are not — they are in the README. What 403
+ * gives instead is an honest answer to an authenticated user who took a wrong
+ * turn, rather than sending them to debug a path that does exist.
+ *
+ * A signed-out caller still gets 401 from `requireUser`, which runs first, so
+ * the two failures stay distinguishable: sign in, versus you are signed in and
+ * this is not for you.
+ */
+export async function requireAdmin(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+  if (!request.user) {
+    await reply.status(401).send({
+      error: 'unauthenticated',
+      message: 'Sign in to continue.',
+    })
+    return
+  }
+
+  if (request.user.role !== 'ADMIN') {
+    request.log.warn(
+      { userId: request.user.id, url: request.url },
+      'non-admin attempted an admin route',
+    )
+
+    await reply.status(403).send({
+      error: 'forbidden',
+      message: 'This area is for administrator accounts.',
     })
   }
 }

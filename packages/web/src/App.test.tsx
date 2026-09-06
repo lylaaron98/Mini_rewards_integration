@@ -15,9 +15,11 @@ import { ToastProvider } from './lib/toast'
  */
 
 const USERS = [
-  { id: 'u1', externalRef: 'acme-user-001', displayName: 'Ada Lovelace' },
-  { id: 'u3', externalRef: 'acme-user-003', displayName: 'Alan Turing' },
+  { id: 'u1', externalRef: 'acme-user-001', displayName: 'Ada Lovelace', role: 'USER' },
+  { id: 'u3', externalRef: 'acme-user-003', displayName: 'Alan Turing', role: 'USER' },
 ]
+
+const ADMIN = { id: 'a1', externalRef: 'local:seed-admin', displayName: 'Dev Admin', role: 'ADMIN' }
 
 const REWARDS = [
   {
@@ -81,8 +83,6 @@ function respond(status: number, body: unknown) {
 }
 
 beforeEach(() => {
-  window.localStorage.setItem('mini-rewards.demo-user', 'acme-user-001')
-
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: string | URL, init?: RequestInit) => {
@@ -94,6 +94,10 @@ beforeEach(() => {
       }
 
       if (url.startsWith('/api/demo/users')) return respond(200, USERS)
+
+      // The session is the root of the app: without it nothing personal
+      // renders, so every test that exercises the signed-in UI needs one.
+      if (url.startsWith('/api/auth/me')) return respond(200, USERS[0])
       if (url.startsWith('/api/rewards')) return respond(200, REWARDS)
       if (url.startsWith('/api/me/transactions')) return respond(200, TRANSACTIONS)
       if (url.startsWith('/api/me')) {
@@ -114,11 +118,16 @@ beforeEach(() => {
 
 afterEach(() => {
   handlers = []
+  window.location.hash = ''
   vi.unstubAllGlobals()
   window.localStorage.clear()
 })
 
-function renderApp() {
+function renderApp(route: 'overview' | 'rewards' | 'activity' | 'developer' = 'overview') {
+  // The hash is set before render because the router reads it on mount — the
+  // same path a pasted link takes.
+  window.location.hash = `/${route}`
+
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: 0 } },
   })
@@ -143,7 +152,11 @@ describe('the balance', () => {
     // the number itself has to be awaited rather than read synchronously.
     const balance = await screen.findByRole('region', { name: /your balance/i })
 
-    expect(await within(balance).findByText('355')).toBeInTheDocument()
+    // Scoped to the live region: the figure also appears in the chart's table
+    // view, which is the point of that table existing.
+    expect(
+      await within(balance).findByText('355', { selector: '[aria-live="polite"]' }),
+    ).toBeInTheDocument()
     expect(within(balance).getByText('points')).toBeInTheDocument()
     expect(within(balance).getByText(/Ada Lovelace/)).toBeInTheDocument()
   })
@@ -152,13 +165,61 @@ describe('the balance', () => {
     renderApp()
 
     const balance = await screen.findByRole('region', { name: /your balance/i })
-    expect(await within(balance).findByText('355')).toHaveAttribute('aria-live', 'polite')
+    expect(
+      await within(balance).findByText('355', { selector: '[aria-live="polite"]' }),
+    ).toHaveAttribute('aria-live', 'polite')
   })
 })
 
-describe('the reward catalogue', () => {
-  it('offers a redeem button only for rewards the user can afford', async () => {
+describe('the balance chart', () => {
+  /**
+   * The chart is derived from the loaded history, so it can never disagree with
+   * the list underneath it.
+   */
+  it('plots the balance and labels what it shows', async () => {
     renderApp()
+
+    const chart = await screen.findByRole('img', { name: /balance over time/i })
+    expect(chart).toBeInTheDocument()
+
+    // Named in the accessible label rather than left to the visual alone.
+    expect(chart.getAttribute('aria-label')).toContain('355')
+  })
+
+  /**
+   * A tooltip must never be the only way to read a value. The table view is what
+   * makes that true for a screen reader, for print, and for anyone not using a
+   * pointer.
+   */
+  it('offers a table view of the same figures', async () => {
+    renderApp()
+
+    expect(await screen.findByText('Table view')).toBeInTheDocument()
+    expect(screen.getByRole('table', { name: /balance after each transaction/i })).toBeInTheDocument()
+  })
+
+  /**
+   * Two points are the minimum that can show a trend. One transaction drawn as a
+   * line would be a chart of nothing.
+   */
+  it('says so rather than drawing a line through a single point', async () => {
+    handlers = [
+      (url) =>
+        url.startsWith('/api/me/transactions')
+          ? { body: { items: [], nextCursor: null } }
+          : (undefined as never),
+    ]
+
+    renderApp()
+
+    expect(await screen.findByText(/at least two transactions/i)).toBeInTheDocument()
+    expect(screen.queryByRole('img', { name: /balance over time/i })).not.toBeInTheDocument()
+  })
+})
+
+describe('the rewards shop', () => {
+  it('offers a redeem button only for rewards the user can afford', async () => {
+    renderApp('rewards')
 
     // Three rewards are listed, and exactly one is both affordable and in
     // stock — so exactly one live Redeem button should exist.
@@ -174,13 +235,16 @@ describe('the reward catalogue', () => {
    * 25,000 − 355 = 24,645.
    */
   it('tells the user exactly how many more points they need', async () => {
-    renderApp()
+    renderApp('rewards')
 
-    expect(await screen.findByText('24,645 more points needed')).toBeInTheDocument()
+    // The meter states the shortfall in words beside the bar, so the number is
+    // never carried by the bar alone.
+    expect(await screen.findByText('24,645 more')).toBeInTheDocument()
+    expect(screen.getByText(/1% of the way there/)).toBeInTheDocument()
   })
 
   it('marks a sold-out reward rather than offering it', async () => {
-    renderApp()
+    renderApp('rewards')
 
     expect(await screen.findByText('Out of stock')).toBeInTheDocument()
     expect(screen.getByText('Sold out')).toBeInTheDocument()
@@ -190,7 +254,7 @@ describe('the reward catalogue', () => {
 describe('redeeming', () => {
   it('shows the arithmetic before spending anything', async () => {
     const user = userEvent.setup()
-    renderApp()
+    renderApp('rewards')
 
     await user.click(await screen.findByRole('button', { name: 'Redeem' }))
 
@@ -226,7 +290,7 @@ describe('redeeming', () => {
           : (undefined as never),
     ]
 
-    renderApp()
+    renderApp('rewards')
     await user.click(await screen.findByRole('button', { name: 'Redeem' }))
     await user.click(await screen.findByRole('button', { name: /Redeem for/ }))
 
@@ -269,7 +333,7 @@ describe('redeeming', () => {
           : (undefined as never),
     ]
 
-    renderApp()
+    renderApp('rewards')
     await user.click(await screen.findByRole('button', { name: 'Redeem' }))
     await user.click(await screen.findByRole('button', { name: /Redeem for/ }))
 
@@ -295,12 +359,15 @@ describe('redeeming', () => {
           : (undefined as never),
     ]
 
-    renderApp()
+    renderApp('rewards')
     await user.click(await screen.findByRole('button', { name: 'Redeem' }))
     await user.click(await screen.findByRole('button', { name: /Redeem for/ }))
 
-    expect(await screen.findByText('Not enough points yet')).toBeInTheDocument()
-    expect(screen.getByText('You need 395 more points.')).toBeInTheDocument()
+    // Scoped to the toast: the same phrase labels any unaffordable card, and
+    // the assertion is about what the failed request said.
+    const toast = await screen.findByRole('status')
+    expect(within(toast).getByText('Not enough points yet')).toBeInTheDocument()
+    expect(within(toast).getByText('You need 395 more points.')).toBeInTheDocument()
   })
 
   it('says something different when the reward sold out mid-flight', async () => {
@@ -313,7 +380,7 @@ describe('redeeming', () => {
           : (undefined as never),
     ]
 
-    renderApp()
+    renderApp('rewards')
     await user.click(await screen.findByRole('button', { name: 'Redeem' }))
     await user.click(await screen.findByRole('button', { name: /Redeem for/ }))
 
@@ -349,14 +416,147 @@ describe('the activity list', () => {
   })
 })
 
-describe('choosing a user', () => {
-  it('asks for a user before showing anything personal', async () => {
-    window.localStorage.clear()
+describe('navigation', () => {
+  /**
+   * Real links with real hrefs, so they can be middle-clicked, opened in a new
+   * tab and copied — none of which a button calling navigate() supports.
+   */
+  it('links to each section and marks the current one', async () => {
     renderApp()
 
-    expect(await screen.findByText('Choose a user to begin')).toBeInTheDocument()
+    const nav = await screen.findByRole('navigation', { name: /sections/i })
+    const links = within(nav).getAllByRole('link')
+
+    /*
+      Asserted by href rather than by accessible name. Each item's name includes
+      its hint — "Overview, Balance and recent activity" — so a name regex like
+      /activity/i matches two of them. The href is the unambiguous identity.
+    */
+    expect(links.map((link) => link.getAttribute('href'))).toEqual([
+      '#/overview',
+      '#/rewards',
+      '#/activity',
+    ])
+
+    // aria-current is what tells a screen reader which page it is on; the active
+    // styling alone is visible only to people who can see it.
+    expect(links[0]).toHaveAttribute('aria-current', 'page')
+    expect(links[1]).not.toHaveAttribute('aria-current')
+  })
+
+  it('shows the page named by the URL', async () => {
+    renderApp('rewards')
+
+    expect(await screen.findByRole('heading', { name: 'Rewards', level: 2 })).toBeInTheDocument()
+  })
+
+  /**
+   * An unknown hash is not an error worth showing anyone — it falls back to the
+   * landing page rather than rendering nothing at all.
+   */
+  it('falls back to the overview for an unknown route', async () => {
+    window.location.hash = '/not-a-page'
+    renderApp()
+
+    expect(await screen.findByRole('region', { name: /your balance/i })).toBeInTheDocument()
+  })
+})
+
+describe('the developer section', () => {
+  /**
+   * Hidden from ordinary users. Presentation only — the endpoints enforce the
+   * same rule server-side, which is what actually protects them.
+   */
+  it('is not offered in the navigation to an ordinary user', async () => {
+    renderApp()
+
+    const nav = await screen.findByRole('navigation', { name: /sections/i })
+    expect(within(nav).queryByRole('link', { name: /developer/i })).not.toBeInTheDocument()
+  })
+
+  /**
+   * A URL is typed, pasted and bookmarked, so hiding the link is not the same as
+   * refusing the page.
+   */
+  it('refuses the page to an ordinary user who navigates to it directly', async () => {
+    renderApp('developer')
+
+    expect(await screen.findByText(/for administrator accounts/i)).toBeInTheDocument()
+  })
+
+  it('is available to an administrator', async () => {
+    handlers = [
+      (url) =>
+        url.startsWith('/api/auth/me') ? { status: 200, body: ADMIN } : (undefined as never),
+    ]
+
+    renderApp('developer')
+
+    expect(await screen.findByRole('heading', { name: /developer panel/i })).toBeInTheDocument()
+  })
+})
+
+describe('signing in', () => {
+  /**
+   * A 401 from the session endpoint is the ordinary signed-out state, not a
+   * failure — the app has to read it that way rather than surfacing an error.
+   */
+  it('shows the sign-in form when there is no session', async () => {
+    handlers = [
+      (url) =>
+        url.startsWith('/api/auth/me')
+          ? { status: 401, body: { error: 'unauthenticated', message: 'Sign in to continue.' } }
+          : (undefined as never),
+    ]
+
+    renderApp()
+
+    expect(await screen.findByRole('button', { name: 'Sign in' })).toBeInTheDocument()
+
+    // Nothing personal is rendered before the session is known.
     await waitFor(() => {
       expect(screen.queryByText('Your balance')).not.toBeInTheDocument()
     })
+  })
+
+  /** The demo accounts are listed where they are needed, not in a README. */
+  it('lists the demo accounts on the sign-in screen', async () => {
+    handlers = [
+      (url) =>
+        url.startsWith('/api/auth/me')
+          ? { status: 401, body: { error: 'unauthenticated', message: 'Sign in to continue.' } }
+          : (undefined as never),
+    ]
+
+    renderApp()
+
+    expect(await screen.findByText('Demo accounts')).toBeInTheDocument()
+    expect(screen.getByText('Ada Lovelace')).toBeInTheDocument()
+  })
+
+  it('signs out and returns to the sign-in form', async () => {
+    const user = userEvent.setup()
+    let signedIn = true
+
+    handlers = [
+      (url, init) => {
+        if (url.startsWith('/api/auth/logout') && init?.method === 'POST') {
+          signedIn = false
+          return { status: 204, body: null }
+        }
+        if (url.startsWith('/api/auth/me')) {
+          return signedIn
+            ? { status: 200, body: USERS[0] }
+            : { status: 401, body: { error: 'unauthenticated', message: 'Sign in to continue.' } }
+        }
+        return undefined as never
+      },
+    ]
+
+    renderApp()
+
+    await user.click(await screen.findByRole('button', { name: 'Sign out' }))
+
+    expect(await screen.findByRole('button', { name: 'Sign in' })).toBeInTheDocument()
   })
 })

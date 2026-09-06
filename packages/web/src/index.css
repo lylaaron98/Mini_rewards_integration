@@ -1,5 +1,54 @@
 @import 'tailwindcss';
 
+/*
+  Class-based dark mode rather than Tailwind's default `prefers-color-scheme`.
+
+  The default variant reads the system setting and nothing else, which makes a
+  toggle impossible: there is no way for a button to override the media query.
+  Keying on a `.dark` class on <html> lets the system preference decide the
+  initial value while still letting the user disagree with it — and the two are
+  reconciled in `use-theme.ts`, not here.
+*/
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+  `color-scheme` is what makes the browser's own chrome follow the theme —
+  the native `<select>` dropdown, scrollbars, and form control defaults. Without
+  it a dark page renders a white dropdown list, which looks like a bug rather
+  than an oversight.
+*/
+:root {
+  color-scheme: light;
+  --focus-ring: var(--color-slate-900);
+  --dialog-backdrop: rgb(15 23 42 / 0.45);
+
+  /*
+    Chart tokens.
+
+    One series, so one hue. Both steps are validated against the actual card
+    surfaces they sit on — #ffffff in light, #0f172a in dark — for the lightness
+    band, chroma floor and 3:1 contrast. The dark step is the same hue re-stepped
+    for the dark surface, not the light value reused: a colour chosen against
+    white is either too dark to read or too saturated to look at once the ground
+    beneath it changes.
+  */
+  --viz-series: #2a78d6;
+  --viz-surface: #ffffff;
+  --viz-axis: var(--color-slate-200);
+}
+
+.dark {
+  color-scheme: dark;
+  /* A dark ring on a dark background is invisible, which would silently undo
+     the keyboard accessibility the ring exists for. */
+  --focus-ring: var(--color-slate-100);
+  --dialog-backdrop: rgb(2 6 23 / 0.7);
+
+  --viz-series: #3987e5;
+  --viz-surface: #0f172a;
+  --viz-axis: var(--color-slate-800);
+}
+
 @keyframes toast-in {
   from {
     opacity: 0;
@@ -46,14 +95,17 @@
   rather than per component, because the failure mode of per-component focus
   styling is that one component quietly misses it and becomes unreachable for
   anyone not using a mouse.
+
+  The colour comes from a variable so it inverts with the theme rather than
+  needing a `dark:` variant on every focusable element.
 */
 :where(a, button, input, select, textarea, [tabindex]):focus-visible {
-  outline: 2px solid var(--color-slate-900);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
   border-radius: 0.25rem;
 }
 
 /* The dialog backdrop, which cannot be styled with a utility class. */
 dialog::backdrop {
-  background: rgb(15 23 42 / 0.45);
+  background: var(--dialog-backdrop);
 }

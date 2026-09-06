@@ -1,9 +1,11 @@
+import cookie from '@fastify/cookie'
 import rateLimit from '@fastify/rate-limit'
 import Fastify from 'fastify'
 import type { FastifyInstance } from 'fastify'
 import rawBody from 'fastify-raw-body'
 
 import { env } from './env.js'
+import { authRoutes } from './modules/auth/auth.routes.js'
 import { devRoutes } from './modules/dev/dev.routes.js'
 import { healthRoutes } from './modules/health/health.routes.js'
 import { redemptionRoutes } from './modules/redemption/redemption.routes.js'
@@ -171,6 +173,13 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     runFirst: true,
   })
 
+  /**
+   * Registered before the auth hook, which reads request.cookies. Without it
+   * that property does not exist and every request resolves to nobody — a
+   * silent logout rather than an error, which is the harder version to find.
+   */
+  await app.register(cookie)
+
   // Applied to the root instance so every route can read request.user. It only
   // resolves an identity and never rejects; routes that require one opt in with
   // requireUser, so the webhook is not forced to invent an acting user it does
@@ -180,6 +189,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   // Every route lives under /api, health included, so the Vite dev proxy needs
   // exactly one rule and there is no second origin for a browser to refuse.
   await app.register(healthRoutes, { prefix: '/api/health' })
+  await app.register(authRoutes, { prefix: '/api/auth' })
   await app.register(webhookRoutes, { prefix: '/api/webhooks' })
   await app.register(userRoutes, { prefix: '/api' })
   await app.register(demoRoutes, { prefix: '/api/demo' })

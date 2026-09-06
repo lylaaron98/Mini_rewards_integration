@@ -1,6 +1,28 @@
 import '@testing-library/jest-dom/vitest'
 
 /**
+ * jsdom does not implement `matchMedia`, and the theme hook uses it to follow
+ * the system preference while the user has not chosen one.
+ *
+ * Stubbed as "prefers light" with working listener registration, so the default
+ * in tests is the light theme and the subscribe/unsubscribe path still runs —
+ * a stub that threw on `addEventListener` would hide a leak rather than expose
+ * it.
+ */
+if (typeof window !== 'undefined' && typeof window.matchMedia !== 'function') {
+  window.matchMedia = ((query: string) => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    addListener: () => {},
+    removeListener: () => {},
+    dispatchEvent: () => false,
+  })) as typeof window.matchMedia
+}
+
+/**
  * jsdom does not implement the native `<dialog>` element's modal behaviour, so
  * `showModal()` and `close()` are missing and the redeem dialog would throw on
  * open.

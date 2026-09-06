@@ -71,6 +71,17 @@ enum UnmatchedReason {
   NO_RULE
 }
 
+/// What a signed-in account is allowed to do.
+///
+/// An enum rather than an `isAdmin` boolean: the next role — a support agent who
+/// can read deliveries but not simulate them — is a new variant here, whereas
+/// with booleans it is a second column and every check becomes a combination
+/// nobody can keep straight.
+enum UserRole {
+  USER
+  ADMIN
+}
+
 // ---------------------------------------------------------------------------
 // Models
 // ---------------------------------------------------------------------------
@@ -86,15 +97,70 @@ model User {
   /// Recorded as a known gap in NOTES.md rather than pre-built.
   externalRef String  @unique @map("external_ref")
   displayName String  @map("display_name")
-  email       String?
+
+  /// The login identifier, so it has to be unique.
+  ///
+  /// Still nullable, because a user can exist without ever having signed in —
+  /// an operator import, or a partner reference we were told about before the
+  /// person registered. Postgres allows many NULLs under a unique index, so
+  /// those coexist while every real account is distinct.
+  email String? @unique
+
+  /// Null for a user who has never set a password.
+  ///
+  /// Such an account cannot be logged into, and the login route treats it
+  /// exactly like a wrong password — telling the two apart would turn the login
+  /// form into a way to discover which accounts exist.
+  passwordHash String? @map("password_hash")
+
+  /// Defaults to USER, so a new account is never accidentally privileged.
+  ///
+  /// Anyone registering through the sign-up form gets the default; there is no
+  /// route that grants ADMIN, which is deliberate — promoting an account is a
+  /// deployment action, not something an application endpoint should offer.
+  role UserRole @default(USER)
 
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
 
   balance      UserBalance?
   transactions PointTransaction[]
   redemptions  Redemption[]
+  sessions     Session[]
 
   @@map("users")
+}
+
+/// A logged-in session.
+///
+/// Server-side rather than a self-contained token, because logging out has to
+/// actually revoke something. A stateless token stays valid until it expires no
+/// matter what the server thinks, so "log out everywhere" becomes a denylist —
+/// which is this table, arrived at later and with a worse name.
+model Session {
+  /// The SHA-256 of the token, never the token itself.
+  ///
+  /// The cookie carries 32 random bytes; only its hash is stored. A dump of this
+  /// table therefore yields nothing an attacker can present as a session, which
+  /// is the same reasoning that applies to passwords and applies equally here —
+  /// a session token is a bearer credential.
+  id String @id
+
+  userId String @map("user_id")
+
+  /// Absolute, not sliding. A session that renews on every request never expires
+  /// for an active attacker, which is precisely who keeps using it.
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(3)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  /// Cascade: deleting a user should take their sessions with them. Unlike the
+  /// ledger, a session is not a record of anything that needs keeping.
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// Revoking every session for one user, and sweeping expired rows.
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
 }
 
 /// The ledger. Append-only: no row here is ever updated or deleted.

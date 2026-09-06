@@ -9,7 +9,7 @@
 export function Skeleton({ className = '' }: { className?: string }) {
   return (
     <div
-      className={`motion-safe:animate-[skeleton-pulse_1.6s_ease-in-out_infinite] rounded bg-slate-200 ${className}`}
+      className={`motion-safe:animate-[skeleton-pulse_1.6s_ease-in-out_infinite] rounded bg-slate-200 dark:bg-slate-800 ${className}`}
       // Decorative: the surrounding region is already marked aria-busy, so
       // announcing each grey block would be noise.
       aria-hidden="true"

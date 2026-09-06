@@ -70,12 +70,15 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
 }
 
 /**
- * The demo user switcher.
+ * The seeded demo accounts.
  *
- * Registered separately and without `requireUser`, because the UI needs it
- * before anyone has been selected — the list is what lets you pick. It exists
- * only because authentication is stubbed, and real sessions delete it rather
- * than securing it.
+ * Deliberately unauthenticated, because the sign-in screen lists them before
+ * anyone has a session — that is its only reason to exist. It returns display
+ * names and partner references, never email addresses or roles beyond what the
+ * screen shows, and it is seed data for a local database.
+ *
+ * A real deployment deletes this endpoint rather than securing it: an endpoint
+ * that enumerates accounts has no place in one.
  */
 export async function demoRoutes(app: FastifyInstance): Promise<void> {
   app.get('/users', async () => listUsers(prisma))
