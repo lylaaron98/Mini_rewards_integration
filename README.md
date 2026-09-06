@@ -25,9 +25,26 @@ pnpm db:seed        # loads the development dataset
 pnpm dev            # API on :3000, web on :5173
 ```
 
-Then open <http://localhost:5173>. The status panel turns green once the API and database
-are both reachable, which is also the quickest way to tell whether the container has
-finished starting.
+Then open <http://localhost:5173>, pick a user from the switcher, and you have a balance, a
+catalogue and a history.
+
+**Start with the developer panel at the bottom of the page.** Most of what this service
+actually does happens behind a signed webhook, and the panel is how you see it without
+hand-crafting an HMAC:
+
+- **Purchase / Referral / App review** send a genuinely signed partner event through the real
+  webhook route. The balance and history update.
+- **Survey (no rule)** is accepted with a 202 and credits nothing — it is parked as
+  `UNMATCHED / NO_RULE` and appears in the deliveries list with its reason. This is the case
+  where a partner is sending valid activity we have no pricing for.
+- **Replay the last event id** sends the same event twice. The second is answered 200 with
+  `duplicate: true` and moves no points.
+- **Ledger reconciliation** compares every cached balance against the sum of its ledger.
+
+To watch a redemption fail and refund itself, set `FULFILLMENT_FAILURE_RATE=1` in
+`packages/api/.env` and redeem something: the points are taken, fulfilment refuses, a
+`REVERSAL` entry is written, the stock unit is returned, and the balance comes back — all
+visible in the history.
 
 > On Windows, the two dev servers bind different address families, which matters only for
 > command-line tools — browsers fall back automatically:
@@ -99,12 +116,17 @@ packages/
         user/              Balance reads and the demo switcher
         reward/            The catalogue
         redemption/        Two-phase redemption and the fulfilment stub
+        dev/               Simulator, deliveries and reconcile. Not registered in production.
       plugins/
         auth.ts            The stubbed authentication seam
   web/                     React + Vite + TanStack Query + Tailwind
     src/
-      lib/api.ts           The single API client
-      App.tsx
+      App.tsx              Layout and the redemption flow
+      components/          Balance, Rewards, History, RedeemDialog, DevPanel
+      lib/
+        api.ts             The single API client
+        redemption-copy.ts Per-error-code copy; the failed-fulfilment wording
+        toast.tsx          Minimal toast provider
 ```
 
 Each module owns one domain concept and exposes it through its service. Routes parse the
@@ -122,6 +144,10 @@ in the service, where no HTTP layer is in the way.
 | GET    | `/api/rewards`       | The catalogue, cheapest first, with `inStock`.       |
 | GET    | `/api/demo/users`    | Users for the demo switcher. Stub-auth only.        |
 | POST   | `/api/redemptions`   | Redeem a reward. Needs `X-Demo-User` and `Idempotency-Key`. |
+| GET    | `/api/me/transactions` | Ledger history, cursor-paginated. `?cursor=&limit=&type=` |
+| POST   | `/api/dev/simulate-activity` | Signs a real payload and posts it to the webhook. Dev only. |
+| GET    | `/api/dev/deliveries` | Recent deliveries, including parked ones. Dev only.  |
+| GET    | `/api/dev/reconcile` | Balances vs. ledger. Empty is healthy. Dev only.     |
 
 Everything is mounted under `/api`, health included, so the Vite dev proxy needs exactly one
 rule and the browser never makes a cross-origin request.

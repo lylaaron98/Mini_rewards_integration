@@ -1,8 +1,21 @@
+import { TransactionType } from '@prisma/client'
 import type { FastifyInstance } from 'fastify'
+import { z } from 'zod'
 
 import { prisma } from '../../lib/db.js'
 import { actingUser, requireUser } from '../../plugins/auth.js'
+import { listTransactions } from '../ledger/ledger.service.js'
 import { getMe, listUsers } from './user.service.js'
+
+const transactionQuerySchema = z.object({
+  cursor: z.string().min(1).optional(),
+  /**
+   * Capped at 100. An uncapped limit lets any client turn one request into a
+   * full table scan, and nothing in this UI needs more than a screenful.
+   */
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  type: z.nativeEnum(TransactionType).optional(),
+})
 
 export async function userRoutes(app: FastifyInstance): Promise<void> {
   /**
@@ -21,6 +34,38 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     }
 
     return reply.send(me)
+  })
+
+  /**
+   * The acting user's ledger, newest first, cursor-paginated.
+   *
+   * Every entry is returned as it was written — no aggregation, no rolling up
+   * of a redemption and its reversal into a net figure. The screen this feeds
+   * exists so a person can audit what happened, and a smoothed history is not
+   * an audit trail. A failed redemption showing as a debit followed by a refund
+   * is the truth; showing nothing at all, because they cancel out, hides the
+   * event that most needs explaining.
+   */
+  app.get('/me/transactions', { preHandler: requireUser }, async (request, reply) => {
+    const query = transactionQuerySchema.safeParse(request.query)
+
+    if (!query.success) {
+      return reply.status(400).send({
+        error: 'invalid_request',
+        message: query.error.issues
+          .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
+          .join('; '),
+      })
+    }
+
+    const page = await listTransactions(prisma, {
+      userId: actingUser(request).id,
+      cursor: query.data.cursor,
+      limit: query.data.limit,
+      type: query.data.type,
+    })
+
+    return reply.send(page)
   })
 }
 

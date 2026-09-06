@@ -414,6 +414,126 @@ export async function reverseEntry(
 }
 
 // ---------------------------------------------------------------------------
+// History
+// ---------------------------------------------------------------------------
+
+export type LedgerEntrySummary = {
+  id: string
+  delta: number
+  type: TransactionType
+  description: string
+  source: string
+  createdAt: Date
+}
+
+export type TransactionPage = {
+  items: LedgerEntrySummary[]
+  /** Pass back as `cursor` to fetch the next page. Null when there are none. */
+  nextCursor: string | null
+}
+
+export type ListTransactionsInput = {
+  userId: string
+  cursor?: string | undefined
+  limit: number
+  type?: TransactionType | undefined
+}
+
+/**
+ * Cursors are opaque on purpose.
+ *
+ * Encoding `${createdAt}|${id}` in base64url gives clients something they cannot
+ * be tempted to construct, decompose, or persist as a page number. The day the
+ * sort key changes, every previously issued cursor becomes garbage — which is
+ * why decoding failures are treated as "start from the beginning" rather than as
+ * an error a user has to understand.
+ */
+function encodeCursor(entry: { createdAt: Date; id: string }): string {
+  return Buffer.from(`${entry.createdAt.toISOString()}|${entry.id}`, 'utf8').toString('base64url')
+}
+
+function decodeCursor(cursor: string): { createdAt: Date; id: string } | null {
+  try {
+    const [timestamp, id] = Buffer.from(cursor, 'base64url').toString('utf8').split('|')
+    if (!timestamp || !id) return null
+
+    const createdAt = new Date(timestamp)
+    if (Number.isNaN(createdAt.getTime())) return null
+
+    return { createdAt, id }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * A page of a user's ledger, newest first.
+ *
+ * CURSOR pagination, not offset, and the difference matters specifically here.
+ *
+ * `OFFSET 20` means "skip the first twenty rows of the result as it exists
+ * now". On a feed that is being appended to — which is exactly what a
+ * transaction history is — new entries push everything down between one request
+ * and the next. A user reading page 2 after earning points sees the last row of
+ * page 1 again; a user whose entry lands elsewhere loses a row entirely. Both
+ * are silent: nothing errors, the list just quietly lies. For a screen whose
+ * entire purpose is auditability, a page that can skip a transaction is worse
+ * than no pagination at all.
+ *
+ * A cursor says "everything strictly older than this exact entry", which is
+ * stable no matter what has been inserted since. The comparison is on
+ * `(createdAt, id)` as a pair rather than on `createdAt` alone, because two
+ * entries can share a millisecond — a redemption and its reversal routinely do —
+ * and a page boundary landing between them would otherwise repeat or drop one.
+ * `id` breaks that tie, and the index is declared in the same order.
+ */
+export async function listTransactions(
+  tx: Tx,
+  input: ListTransactionsInput,
+): Promise<TransactionPage> {
+  const cursor = input.cursor === undefined ? null : decodeCursor(input.cursor)
+
+  const entries = await tx.pointTransaction.findMany({
+    where: {
+      userId: input.userId,
+      ...(input.type === undefined ? {} : { type: input.type }),
+      ...(cursor === null
+        ? {}
+        : {
+            // Strictly older than the cursor entry: an earlier timestamp, or the
+            // same timestamp with a lower id.
+            OR: [
+              { createdAt: { lt: cursor.createdAt } },
+              { createdAt: cursor.createdAt, id: { lt: cursor.id } },
+            ],
+          }),
+    },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    // One more than asked for, purely to discover whether another page exists.
+    // Counting the whole table instead would cost a scan on every request to
+    // answer a question the client only needs as a boolean.
+    take: input.limit + 1,
+    select: {
+      id: true,
+      delta: true,
+      type: true,
+      description: true,
+      source: true,
+      createdAt: true,
+    },
+  })
+
+  const hasMore = entries.length > input.limit
+  const items = hasMore ? entries.slice(0, input.limit) : entries
+  const last = items[items.length - 1]
+
+  return {
+    items,
+    nextCursor: hasMore && last ? encodeCursor(last) : null,
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Reconciliation
 // ---------------------------------------------------------------------------
 

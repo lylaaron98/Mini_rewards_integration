@@ -3,6 +3,7 @@ import type { FastifyInstance } from 'fastify'
 import rawBody from 'fastify-raw-body'
 
 import { env } from './env.js'
+import { devRoutes } from './modules/dev/dev.routes.js'
 import { healthRoutes } from './modules/health/health.routes.js'
 import { redemptionRoutes } from './modules/redemption/redemption.routes.js'
 import { rewardRoutes } from './modules/reward/reward.routes.js'
@@ -61,6 +62,17 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(demoRoutes, { prefix: '/api/demo' })
   await app.register(rewardRoutes, { prefix: '/api/rewards' })
   await app.register(redemptionRoutes, { prefix: '/api/redemptions' })
+
+  /**
+   * Registered only outside production, so these routes do not exist in a real
+   * deployment rather than existing behind a flag someone can flip. The
+   * simulator signs genuine payloads, so it weakens nothing — but an endpoint
+   * that lists every delivery and every balance discrepancy is a development
+   * tool, and the safest way to keep it one is for it not to be there.
+   */
+  if (env.NODE_ENV !== 'production') {
+    await app.register(devRoutes, { prefix: '/api/dev' })
+  }
 
   /**
    * Fastify's built-in 404 does not pass through `setErrorHandler`, so without

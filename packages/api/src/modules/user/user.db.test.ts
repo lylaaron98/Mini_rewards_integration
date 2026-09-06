@@ -1,11 +1,13 @@
 import { randomUUID } from 'node:crypto'
 
+import { TransactionType } from '@prisma/client'
 import type { FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 import { buildApp } from '../../app.js'
 import { prisma } from '../../lib/db.js'
 import { DEMO_USER_HEADER } from '../../plugins/auth.js'
+import { appendEntry } from '../ledger/ledger.service.js'
 
 /**
  * The read endpoints, against the seeded dataset.
@@ -23,40 +25,77 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await app.close()
+  const testUsers = { user: { externalRef: { startsWith: TEST_PREFIX } } }
+  await prisma.pointTransaction.deleteMany({ where: testUsers })
+  await prisma.userBalance.deleteMany({ where: testUsers })
   await prisma.user.deleteMany({ where: { externalRef: { startsWith: TEST_PREFIX } } })
   await prisma.$disconnect()
 })
 
 describe('GET /api/me', () => {
+  /**
+   * Deliberately not asserted against a seeded user's balance.
+   *
+   * An earlier version hard-coded Ada's 355, which made the suite fail for
+   * anyone who had clicked a button in the developer panel first — a red test
+   * caused by the app working correctly. The property worth pinning is that the
+   * endpoint serves the *cache*, so the test credits a known amount and checks
+   * it comes back.
+   */
   it('returns the acting user and their cached balance', async () => {
+    const externalRef = `${TEST_PREFIX}${randomUUID()}`
+    const user = await prisma.user.create({
+      data: { externalRef, displayName: 'Balance Reader', email: 'reader@example.com' },
+      select: { id: true },
+    })
+
+    await prisma.$transaction((tx) =>
+      appendEntry(tx, {
+        userId: user.id,
+        delta: 412,
+        type: TransactionType.EARN,
+        source: 'partner:test',
+        externalEventId: `evt-${randomUUID()}`,
+        description: 'Test credit',
+      }),
+    )
+
     const response = await app.inject({
       method: 'GET',
       url: '/api/me',
-      headers: { [DEMO_USER_HEADER]: 'acme-user-001' },
+      headers: { [DEMO_USER_HEADER]: externalRef },
     })
 
     expect(response.statusCode).toBe(200)
     expect(response.json()).toMatchObject({
-      externalRef: 'acme-user-001',
-      displayName: 'Ada Lovelace',
-      balance: 355,
+      externalRef,
+      displayName: 'Balance Reader',
+      email: 'reader@example.com',
+      balance: 412,
     })
   })
 
   /**
    * A user with no activity has no `user_balances` row at all. That must read as
-   * zero rather than as an error or a null — the seeded dataset contains one
-   * specifically so this path is exercised.
+   * zero rather than as an error or a null.
    */
   it('reports zero for a user who has never earned anything', async () => {
+    const externalRef = `${TEST_PREFIX}${randomUUID()}`
+    await prisma.user.create({ data: { externalRef, displayName: 'Quiet User' } })
+
     const response = await app.inject({
       method: 'GET',
       url: '/api/me',
-      headers: { [DEMO_USER_HEADER]: 'acme-user-003' },
+      headers: { [DEMO_USER_HEADER]: externalRef },
     })
 
     expect(response.statusCode).toBe(200)
-    expect(response.json()).toMatchObject({ displayName: 'Alan Turing', balance: 0 })
+    expect(response.json()).toMatchObject({ displayName: 'Quiet User', balance: 0 })
+
+    // The point of the case: no row exists, and that reads as zero rather than
+    // as missing data.
+    const stored = await prisma.userBalance.findFirst({ where: { user: { externalRef } } })
+    expect(stored).toBeNull()
   })
 
   it('answers 401 without an acting user', async () => {

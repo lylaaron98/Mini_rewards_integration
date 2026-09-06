@@ -744,6 +744,138 @@ failure rather than a loud one, which is why they are written down.
   reports success but skips Prisma's postinstall, so the client is never generated and the
   first `tsc` fails with import errors that point nowhere near the cause.
 
+## 13. Transaction history
+
+`GET /api/me/transactions` is **cursor-paginated, not offset-paginated**, and on this screen
+specifically that is a correctness decision rather than a performance one.
+
+`OFFSET 20` means "skip the first twenty rows of the result as it exists now". A transaction
+history is a feed being appended to — a webhook credit can land between a user reading page
+one and requesting page two — and every insert pushes the whole list down. Page two then
+starts with a row already seen, and a different row is skipped entirely on a later page.
+Nothing errors. The list quietly lies, on the one screen whose entire purpose is that a user
+can reconstruct their own balance from it.
+
+A cursor says "strictly older than this exact entry", which is unaffected by anything
+inserted since. The comparison is on `(createdAt, id)` as a pair rather than on `createdAt`
+alone, because two entries routinely share a millisecond — a redemption and its reversal do —
+and a page boundary falling between them would repeat or drop one. There is a test that
+inserts three entries between fetching page one and page two and asserts the second page
+continues exactly where the first stopped.
+
+Cursors are opaque base64 rather than a visible timestamp, so clients cannot construct or
+persist them. An undecodable cursor is treated as "start from the beginning" rather than as
+an error, because there is nothing a user could do with "invalid cursor" and showing them the
+top of their own history is a better answer than showing them a failure.
+
+The API returns one row per ledger entry and never aggregates. A failed redemption appears as
+a debit followed by a refund, two rows, exactly as it happened — not netted to nothing, and
+not collapsed into "cancelled". Smoothing looks tidier and destroys the property the screen
+exists for.
+
+## 14. The interface
+
+### The balance is the only loud thing
+
+Everything else on the page is grey, small, and quiet, so the number a user opens the app to
+see is what their eye lands on. It is rendered with `tabular-nums`: proportional digits have
+different widths, so a balance changing from 355 to 1,355 reflows the layout, and one ticking
+down during a redemption visibly jitters. Tabular figures are identical widths, so the number
+changes without anything moving.
+
+### Unaffordable is a number, not a disabled button
+
+A greyed-out control says "you cannot do this" and nothing else — the user is left to work
+out why, and whether it is permanent. "24,645 more points needed" answers the question they
+actually have and turns a dead end into a target. It is also ordinary focusable text rather
+than an unfocusable disabled control, so a screen reader reaches it.
+
+### Redemption asks first, and shows the arithmetic
+
+Spending points is the only irreversible thing this app lets a user do, so it gets the one
+interruption in the interface — and that interruption earns its place by showing balance now,
+cost, and balance after. "Are you sure?" without the numbers asks a question the user cannot
+answer any better than before it appeared.
+
+Built on the native `<dialog>` element, which brings focus trapping, Escape to close,
+inertness of the content behind it, and a backdrop — all correct, all free. A hand-rolled
+modal gets the visuals right and the focus management wrong, and that failure is invisible
+unless you navigate by keyboard.
+
+### One idempotency key per attempt
+
+`crypto.randomUUID()` is called once, when the dialog opens, and held in a ref. A key minted
+inside the request function would be new on every retry, so a browser replaying a request
+after a flaky connection — or a user clicking twice — would become two purchases. That is
+precisely the failure the header exists to prevent, and generating it in the wrong place
+silently disables the entire mechanism while still sending a header that looks right.
+
+The confirm button is disabled while the request is in flight. The key already makes a double
+submission harmless server-side; the disabled state is there so the user is not left
+wondering whether their first click registered.
+
+### A failed redemption says the points came back
+
+This is the case that most needed its own copy. A failed fulfilment is a **successful
+request** reporting a **failed outcome** — the redemption was created, the points were taken,
+the provider refused, and the compensating reversal has already returned them. A generic
+"something went wrong" would be a lie by omission: the user would reasonably assume their
+points were gone and go looking for them.
+
+Error copy is distinct per code for the same reason. "You need 395 more points" is actionable
+and tells them exactly how far off they are; "someone else took the last one" is not their
+fault and there is nothing to do about it. Collapsing both into "Redemption failed" throws
+away the only useful part of the message.
+
+### Skeletons, not spinners
+
+A spinner says something is happening. A skeleton says something is happening *and here is
+the shape it will take* — the layout does not jump when data lands, and the eye has already
+found where the number will be. On a screen whose main element is a single balance, that is
+most of the perceived speed.
+
+### Accessibility is not a pass at the end
+
+A visible `:focus-visible` ring is declared once globally rather than per component, because
+the failure mode of per-component focus styling is that one component quietly misses it and
+becomes unreachable without a mouse. Ledger amounts carry a leading `+` or `−` as well as
+colour, since green-versus-red alone is invisible to a red-green colour-blind reader. Toasts
+are `aria-live="polite"`, which announces them without cutting across whatever the screen
+reader is currently saying. Animations go through Tailwind's `motion-safe:` variant, with a
+global `prefers-reduced-motion` rule as the backstop — collapsing durations rather than
+removing animations, because `animation: none` can strand an element on its first keyframe,
+invisible.
+
+### The developer panel
+
+Without it, the most interesting behaviour in this service is invisible. Ingestion,
+deduplication, unmatched parking and reconciliation all sit behind a webhook requiring a valid
+HMAC, so a reviewer would otherwise have to hand-craft a signature in a terminal before seeing
+any of it work — and would reasonably not bother.
+
+The buttons post to `/api/dev/simulate-activity`, which **signs a genuine payload** and sends
+it through the real webhook route via `app.inject`. Nothing bypasses verification; it is the
+partner's request, made from a button. A simulator that called `processDelivery` directly
+would prove nothing about the part most likely to be wrong.
+
+The panel includes a "replay the last event id" button, which is the single most illuminating
+control in the app: the same event sent twice is answered 200 with `duplicate: true` and moves
+no points. It also surfaces parked `UNMATCHED` deliveries **with their reason**, so the
+`NO_RULE` case is a thing you can see rather than a paragraph in this file, and a live
+reconciliation check — because "balances are a cache" is a claim, and a claim a reviewer can
+verify in one click is worth more than an assertion.
+
+These routes are registered only when `NODE_ENV !== 'production'`, so in a real deployment
+they do not exist rather than existing behind a flag someone can flip.
+
+### Component tests exist because the build cannot catch this
+
+`vite build` proves the code compiles. Every interesting failure in a UI is a runtime one — a
+null balance, a dialog that never opens, an error code with no copy written for it — and none
+of those appear until something renders. `fetch` is stubbed at the boundary rather than the
+API module being mocked, so the real client runs, including the 4xx-to-rejection translation
+everything downstream depends on.
+
 ## Bugs found by adversarial review, after the tests were green
 
 All of Phase 4's tests passed — including twenty concurrent redemptions against a balance

@@ -1,1 +1,59 @@
 @import 'tailwindcss';
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(0.5rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes skeleton-pulse {
+  50% {
+    opacity: 0.4;
+  }
+}
+
+/*
+  Every animation in this app is applied through Tailwind's `motion-safe:`
+  variant, so it is already suppressed for anyone who has asked for less motion.
+  This is the backstop for anything that slips through — a third-party style, or
+  a class someone adds later without the variant.
+
+  Not `animation: none`: removing an animation outright can leave an element
+  stuck at its starting keyframe, invisible. Collapsing the duration lets it run
+  to its final state instantly.
+*/
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/*
+  A visible focus ring on every interactive element, always.
+
+  `:focus-visible` rather than `:focus` so it appears for keyboard navigation
+  without putting a ring around every button a mouse touches. Declared once here
+  rather than per component, because the failure mode of per-component focus
+  styling is that one component quietly misses it and becomes unreachable for
+  anyone not using a mouse.
+*/
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-slate-900);
+  outline-offset: 2px;
+  border-radius: 0.25rem;
+}
+
+/* The dialog backdrop, which cannot be styled with a utility class. */
+dialog::backdrop {
+  background: rgb(15 23 42 / 0.45);
+}
