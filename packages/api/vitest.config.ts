@@ -30,6 +30,8 @@ export default defineConfig({
         process.env.DATABASE_URL ??
         'postgresql://rewards:rewards@localhost:5433/rewards?schema=public',
       NODE_ENV: 'test',
+      WEBHOOK_PARTNER: 'acme',
+      WEBHOOK_SECRET: 'test-webhook-signing-secret',
       LOG_LEVEL: 'silent',
     },
   },

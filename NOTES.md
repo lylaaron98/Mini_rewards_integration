@@ -440,6 +440,125 @@ nothing passes every test you would think to write for it.
 cache from it — but doing that automatically would destroy the evidence of whatever wrote a
 balance it should not have.
 
+## 10. Ingestion
+
+### Capture and process are two functions
+
+`captureDelivery` records that something arrived. `processDelivery` decides what it means.
+Today the route calls them in sequence, which is the simplest thing to debug — one request,
+one path, top to bottom, and a failure is wherever the stack trace says it is.
+
+When volume outgrows synchronous processing, the route stops calling `processDelivery` and a
+worker polls for deliveries left in `RECEIVED` and calls it instead. **Neither function
+changes.** The split *is* the migration. It is not preparation for a queue — it is the part
+of a queue that has to exist either way, written now while it costs nothing.
+
+They also run in **separate transactions**. If they shared one, an error during processing
+would roll back the record that anything ever arrived, and there would be nothing for a
+retry or a worker to find. Capture commits on its own; processing is a second, independent
+step whose failure leaves a durable row behind.
+
+### The status code is a control signal
+
+It decides whether the partner retries, which makes it as load-bearing as the response body.
+Wrong in one direction loses points permanently; wrong in the other produces a retry loop
+that can never succeed.
+
+| Situation | Code | Retry? | Why |
+| --- | --- | --- | --- |
+| New valid event, credited | 202 | No | Accepted. 202 rather than 200 because processing is allowed to become asynchronous without the contract changing. |
+| Duplicate of a credited event | 200 | No | "You had this already", distinguished from "you have it now" — the only difference a retry cares about. |
+| Unknown user | 202 | No | Parked as `UNMATCHED`/`UNKNOWN_USER`. Usually a signup/activity race that resolves itself. |
+| No matching rule | 202 | No | Parked as `UNMATCHED`/`NO_RULE`. Our configuration gap, not their bad request. |
+| Bad or stale signature | 401 | No | Not authenticated, and not stored. |
+| Fails schema, or no `event_id` | 400 | No | Permanently invalid. Retrying cannot help. |
+| `occurred_at` outside the accepted window | 400 | No | Permanently invalid for the same reason. |
+| Internal fault | 500 | Yes | Ours, probably transient. The delivery is marked `FAILED` and a retry reprocesses it. |
+
+**Never 409 for a duplicate.** On an at-least-once channel duplicates are normal operation,
+not an error, and most retry libraries read any 4xx as failure — so a 409 would trip a
+partner's alerting for something that worked exactly as designed.
+
+`RECEIVED` and `FAILED` are deliberately not terminal. A duplicate landing on either of
+those states falls through and processes now, because in both cases the partner's retry is
+the second chance the design intends: `RECEIVED` means an earlier attempt was captured but
+never processed, and `FAILED` means processing hit something transient.
+
+### Signature verification
+
+The signed string is `${timestamp}.${rawBody}`, with the timestamp *inside* the signature
+rather than beside it. That is what makes the five-minute freshness window meaningful: an
+attacker replaying a captured request cannot move its timestamp forward without invalidating
+the signature. Signing the body alone would leave the timestamp as an unauthenticated field
+anyone could rewrite.
+
+For the same reason, authenticity is checked **before** freshness. The timestamp is only
+worth reading once the signature over it has been verified.
+
+`sign()` is exported so the dev simulator produces genuine signatures. A simulator that
+bypassed verification would exercise a code path that does not exist in production, and the
+signature check is precisely the part where a mistake stays invisible until someone forges a
+request.
+
+**Unauthenticated requests are the one failure mode that is not persisted.** Everything else
+is recorded because the evidence is worth keeping; this one cannot be attributed to anybody,
+so storing it would let an anonymous caller write rows into our database at will.
+
+### Malformed bodies are stored, which took a custom parser
+
+Fastify's default JSON parser rejects a malformed body with its own 400 before any handler
+runs — so the payloads most worth keeping would never be seen, let alone stored. The webhook
+routes register a pass-through content-type parser, scoped to that plugin, that hands the
+body over as an unparsed string. Parsing is then this module's job, after the bytes are
+safely recorded.
+
+A body that cannot be parsed has no readable `event_id` to key on, so the delivery key falls
+back to a hash of the raw bytes, prefixed `unparsed:`. **This is not the synthesised dedupe
+key the contract rules out.** That one would merge two legitimately distinct activities and
+silently cost a user points. This key is only ever attached to a delivery that is about to be
+permanently rejected and can never be credited, and its job is to bound storage: without it,
+a partner retrying one broken request would write an unbounded number of identical rows,
+turning their bug into our disk-space problem.
+
+### Freshness bounds on `occurred_at`
+
+Ninety days in the past, one hour in the future. Partner clocks are untrusted input.
+
+Without a lower bound, a misconfigured integration could replay years of history in an
+afternoon, and every event would be priced against whatever rule was in force back then —
+correctly, which is exactly what makes it dangerous. Ninety days is long enough that a
+genuine outage-and-catch-up succeeds and short enough that anything older should be a human
+decision rather than something that happens automatically at 3am.
+
+The future bound is not zero because clock skew between two systems is normal, and rejecting
+a partner whose clock runs eleven seconds fast would be absurd.
+
+### Backfill replays the ordinary path
+
+`backfillUnmatched` runs parked deliveries back through `processDelivery` unchanged. A
+second, subtly different ingestion path is how a backfill ends up crediting a different
+number of points than the original would have.
+
+Each delivery is claimed with a conditional status transition — `UPDATE … WHERE id = ? AND
+status = 'UNMATCHED'`, checking affected rows — before anything is credited. Same shape as
+the conditional stock decrement. Two backfills running at once cannot both claim the same
+row: the second blocks on the row lock, then sees a status that is no longer `UNMATCHED` and
+skips. The ledger's unique constraint sits underneath as an independent guarantee, so a
+double credit would need both to fail. There is a test that runs two backfills concurrently
+and asserts exactly one credit.
+
+Because pricing resolves against `occurredAt`, a replay months later still credits the
+**historical** rate. A test covers this specifically: an event is parked with no rule, two
+rule versions are then created — 70 points at the time it happened, superseded by 5 — and the
+backfill credits 70.
+
+An unfiltered backfill is refused rather than defaulting to "everything". A backfill is a
+bulk credit, and making the unfiltered case an explicit decision is worth the inconvenience.
+
+The whole backfill runs in the caller's transaction, so it is all-or-nothing. That is the
+right trade at this scale — a partially applied backfill is harder to reason about than a
+failed one — but at real volume it would need chunking, each chunk its own transaction.
+
 ## Smaller choices
 
 - **Every route under `/api`, health included.** The Vite dev proxy then needs one rule, the

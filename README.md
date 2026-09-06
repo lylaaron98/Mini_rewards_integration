@@ -95,6 +95,7 @@ packages/
         health/            One directory per domain concept: routes + service
         earning/           Rule-window resolution
         ledger/            The only writer of point_transactions and user_balances
+        webhook/           Ingestion: signature, capture, process, backfill
   web/                     React + Vite + TanStack Query + Tailwind
     src/
       lib/api.ts           The single API client
@@ -111,6 +112,35 @@ in the service, where no HTTP layer is in the way.
 | ------ | -------------------- | --------------------------------------------------- |
 | GET    | `/api/health/live`   | Liveness. Touches nothing external.                  |
 | GET    | `/api/health/ready`  | Readiness. 200 if the database answers, else 503.    |
+| POST   | `/api/webhooks/:partner` | Partner activity ingestion. HMAC-signed; see below. |
 
 Everything is mounted under `/api`, health included, so the Vite dev proxy needs exactly one
 rule and the browser never makes a cross-origin request.
+
+### The webhook
+
+`POST /api/webhooks/acme` expects two headers and a JSON body:
+
+```
+x-webhook-timestamp: <unix seconds>
+x-webhook-signature: <hex HMAC-SHA256 of `${timestamp}.${rawBody}`, keyed with WEBHOOK_SECRET>
+```
+
+```json
+{
+  "event_id": "evt_1",
+  "user_ref": "acme-user-001",
+  "activity_type": "PURCHASE",
+  "occurred_at": "2026-09-06T10:00:00.000Z"
+}
+```
+
+`event_id` is required and is never synthesised — it is the key that makes a partner retry
+harmless. `occurred_at` must be within 90 days past and 1 hour future, and decides which
+version of the earning rule prices the event.
+
+The response status tells the partner whether to retry. The full table, with reasoning, is in
+[NOTES.md](./NOTES.md#10-ingestion): briefly, **202** accepted, **200** already processed,
+**400** permanently invalid, **401** not authenticated, **500** ours and worth retrying. A
+duplicate is never a 409 — on an at-least-once channel duplicates are normal operation, and a
+4xx would trip a partner's alerting for something that worked.

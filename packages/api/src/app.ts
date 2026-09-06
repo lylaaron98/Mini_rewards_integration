@@ -4,6 +4,7 @@ import rawBody from 'fastify-raw-body'
 
 import { env } from './env.js'
 import { healthRoutes } from './modules/health/health.routes.js'
+import { webhookRoutes } from './modules/webhook/webhook.routes.js'
 
 /**
  * Builds the server without starting it.
@@ -45,6 +46,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   // Every route lives under /api, health included, so the Vite dev proxy needs
   // exactly one rule and there is no second origin for a browser to refuse.
   await app.register(healthRoutes, { prefix: '/api/health' })
+  await app.register(webhookRoutes, { prefix: '/api/webhooks' })
 
   /**
    * Fastify's built-in 404 does not pass through `setErrorHandler`, so without

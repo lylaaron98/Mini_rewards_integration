@@ -24,6 +24,22 @@ const environmentSchema = z.object({
   DATABASE_URL: z
     .string()
     .regex(/^postgres(ql)?:\/\//, 'DATABASE_URL must be a postgresql:// connection string'),
+
+  /**
+   * The partner whose deliveries this instance accepts, and the secret their
+   * signatures are verified against.
+   *
+   * One partner, because that is what the exercise needs. A real deployment
+   * looks these up per partner from a table — `source`, the delivery dedupe key
+   * and the route parameter are already scoped per partner, so that change is
+   * configuration rather than schema.
+   *
+   * The secret has a minimum length rather than just being required. A
+   * one-character HMAC key passes "is it set?" and provides no security at all,
+   * and the failure is completely silent.
+   */
+  WEBHOOK_PARTNER: z.string().min(1).default('acme'),
+  WEBHOOK_SECRET: z.string().min(16, 'WEBHOOK_SECRET must be at least 16 characters'),
 })
 
 const parsed = environmentSchema.safeParse(process.env)

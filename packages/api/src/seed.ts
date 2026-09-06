@@ -3,6 +3,7 @@ import { TransactionType } from '@prisma/client'
 import { prisma } from './lib/db.js'
 import type { Tx } from './lib/db.js'
 import { REVERSAL_SOURCE, appendEntry, reconcile } from './modules/ledger/ledger.service.js'
+import { resolveDeliveryKey } from './modules/webhook/webhook.service.js'
 import {
   LEDGER_SOURCE,
   PARTNER,
@@ -224,7 +225,11 @@ async function seed(tx: Tx): Promise<void> {
     await tx.webhookDelivery.create({
       data: {
         partner: PARTNER,
-        externalEventId: delivery.eventId,
+        // Derived with the same function ingestion uses, so the seeded rows are
+        // exactly what a real delivery would have produced. The malformed one
+        // gets a content-hash key, because there is no readable event id in it
+        // to use — which is the whole reason that fallback exists.
+        externalEventId: resolveDeliveryKey(delivery.rawPayload),
         status: delivery.status,
         unmatchedReason: delivery.unmatchedReason,
         rawPayload: delivery.rawPayload,
