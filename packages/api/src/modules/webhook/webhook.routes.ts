@@ -33,7 +33,28 @@ export async function webhookRoutes(app: FastifyInstance): Promise<void> {
 
   app.post<{ Params: { partner: string } }>(
     '/:partner',
-    { config: { rawBody: true } },
+    {
+      config: {
+        rawBody: true,
+
+        /**
+         * A larger allowance than the rest of the API, keyed by partner rather
+         * than by IP.
+         *
+         * By IP would be wrong twice over: a partner behind a proxy or a
+         * serverless egress pool arrives from addresses that change between
+         * requests, so their budget would be split unpredictably — and two
+         * partners sharing an egress IP would consume each other's. The partner
+         * is who we are actually rate limiting, so the partner is the key.
+         */
+        rateLimit: {
+          max: env.WEBHOOK_RATE_LIMIT_MAX,
+          timeWindow: '1 minute',
+          keyGenerator: (request: { params: unknown }) =>
+            `webhook:${(request.params as { partner?: string }).partner ?? 'unknown'}`,
+        },
+      },
+    },
     async (request, reply) => {
       const { partner } = request.params
 
@@ -113,6 +134,22 @@ export async function webhookRoutes(app: FastifyInstance): Promise<void> {
       const capture = await prisma.$transaction((tx) => captureDelivery(tx, partner, rawBody))
 
       /**
+       * From here on, every line carries the partner's own event id alongside
+       * our request id and delivery id.
+       *
+       * This is the join that makes support possible. A partner's question
+       * always starts with their identifier — "we sent evt_88123 and the user
+       * never got the points" — and without it on our lines the only way to
+       * answer is to search a raw payload column by hand. One field turns that
+       * into a lookup.
+       */
+      const log = request.log.child({
+        partner,
+        deliveryId: capture.deliveryId,
+        eventId: capture.externalEventId,
+      })
+
+      /**
        * A duplicate of a delivery that already reached a terminal state is
        * answered from that state without reprocessing.
        *
@@ -123,6 +160,8 @@ export async function webhookRoutes(app: FastifyInstance): Promise<void> {
        * intends, so it falls through and processes now.
        */
       if (capture.duplicate && isTerminal(capture.status)) {
+        log.info({ outcome: capture.status, duplicate: true }, 'webhook replay answered from state')
+
         return reply.status(statusCodeFor(capture.status, true)).send({
           deliveryId: capture.deliveryId,
           status: capture.status,
@@ -165,6 +204,15 @@ export async function webhookRoutes(app: FastifyInstance): Promise<void> {
           })
           throw error
         })
+
+      log.info(
+        {
+          outcome: outcome.status,
+          ...(outcome.status === 'PROCESSED' ? { points: outcome.points } : {}),
+          ...(outcome.status === 'UNMATCHED' ? { reason: outcome.reason } : {}),
+        },
+        'webhook delivery processed',
+      )
 
       return reply
         .status(statusCodeFor(outcome.status, false))

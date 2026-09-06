@@ -50,6 +50,20 @@ const environmentSchema = z.object({
    * does not work.
    */
   FULFILLMENT_FAILURE_RATE: z.coerce.number().min(0).max(1).default(0),
+
+  /**
+   * Requests per minute, per caller.
+   *
+   * Two limits because the two callers fail differently. The user-facing API is
+   * reached from a browser and has no reason to send hundreds of requests a
+   * minute, so a low ceiling costs nothing. A partner catching up after an
+   * outage bursts legitimately, and throttling them there would turn our
+   * protection into their lost events — so the webhook allowance is an order of
+   * magnitude larger, and its refusal (429) is a transient signal telling them
+   * to retry rather than to give up.
+   */
+  RATE_LIMIT_MAX: z.coerce.number().int().positive().default(120),
+  WEBHOOK_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(1200),
 })
 
 const parsed = environmentSchema.safeParse(process.env)

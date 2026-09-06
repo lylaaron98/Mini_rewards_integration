@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { Writable } from 'node:stream'
 
 import type { FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -501,6 +502,56 @@ describe('unmatched deliveries and backfill', () => {
     expect(entries).toHaveLength(8)
     expect(ledgerSum).toBe(400)
     expect(cached?.balance).toBe(ledgerSum)
+  })
+
+  /**
+   * A partner's support question always starts with their identifier — "we sent
+   * evt_88123 and the user never got the points". Without that id on our log
+   * lines, answering means searching a raw payload column by hand.
+   */
+  it('tags its log lines with the partner event id', async () => {
+    const written: string[] = []
+    const destination = new Writable({
+      write(chunk: Buffer, _encoding, callback) {
+        written.push(chunk.toString())
+        callback()
+      },
+    })
+
+    const logged = await buildApp({ loggerDestination: destination })
+
+    try {
+      const userRef = await createUser()
+      const eventId = `${TEST_PREFIX}correlation-${randomUUID()}`
+      const payload = JSON.stringify({
+        event_id: eventId,
+        user_ref: userRef,
+        activity_type: 'PURCHASE',
+        occurred_at: new Date().toISOString(),
+      })
+      const timestamp = String(Math.floor(Date.now() / 1000))
+
+      await logged.inject({
+        method: 'POST',
+        url: `/api/webhooks/${PARTNER}`,
+        headers: {
+          'content-type': 'application/json',
+          [TIMESTAMP_HEADER]: timestamp,
+          [SIGNATURE_HEADER]: sign(SECRET, timestamp, payload),
+        },
+        payload,
+      })
+
+      const output = written.join('')
+
+      expect(output).toContain(eventId)
+      expect(output).toContain('webhook delivery processed')
+      // Correlated with our own identifiers too, so a line found by their id
+      // leads to the delivery row.
+      expect(output).toContain('deliveryId')
+    } finally {
+      await logged.close()
+    }
   })
 
   it('refuses an unfiltered backfill', async () => {

@@ -47,6 +47,12 @@ const NUL = String.fromCharCode(0)
 
 export type CaptureResult = {
   deliveryId: string
+  /**
+   * The key this delivery was stored under — the partner's `event_id`, or the
+   * content hash when there was none. Returned so the route can put the
+   * partner's own identifier on every log line for this request.
+   */
+  externalEventId: string
   /** True when this (partner, eventId) had already been received. */
   duplicate: boolean
   /** The delivery's status — for a duplicate, the ORIGINAL delivery's status. */
@@ -118,7 +124,12 @@ export async function captureDelivery(
 
   const inserted = claimed[0]
   if (inserted) {
-    return { deliveryId: inserted.id, duplicate: false, status: inserted.status }
+    return {
+      deliveryId: inserted.id,
+      externalEventId,
+      duplicate: false,
+      status: inserted.status,
+    }
   }
 
   /**
@@ -137,7 +148,12 @@ export async function captureDelivery(
     select: { id: true, status: true },
   })
 
-  return { deliveryId: existing.id, duplicate: true, status: existing.status }
+  return {
+    deliveryId: existing.id,
+    externalEventId,
+    duplicate: true,
+    status: existing.status,
+  }
 }
 
 // ---------------------------------------------------------------------------

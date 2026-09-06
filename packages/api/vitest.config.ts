@@ -30,6 +30,11 @@ export default defineConfig({
         process.env.DATABASE_URL ??
         'postgresql://rewards:rewards@localhost:5433/rewards?schema=public',
       NODE_ENV: 'test',
+      // Well above anything a suite sends. Rate limiting is proved by its own
+      // test, which builds an app with a limit of two; throttling every other
+      // suite would only make them flaky.
+      RATE_LIMIT_MAX: '100000',
+      WEBHOOK_RATE_LIMIT_MAX: '100000',
       WEBHOOK_PARTNER: 'acme',
       WEBHOOK_SECRET: 'test-webhook-signing-secret',
       LOG_LEVEL: 'silent',

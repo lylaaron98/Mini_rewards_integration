@@ -1,96 +1,171 @@
 # Mini Rewards Integration
 
-A partner sends user activity over a webhook. Users earn points for that activity and
-redeem them for rewards. A small web UI shows the balance, performs redemptions, and
-explains what happened.
+A partner sends user activity over a webhook. Users earn points for that activity and redeem
+them for rewards. A web UI shows the balance, performs redemptions, and explains what
+happened.
 
-The reasoning behind the design — and the trade-offs deliberately taken — is in
+Points are treated as money: the ledger is append-only and authoritative, balances are a
+cache that can be reconciled against it, and every write path assumes it will be called
+twice. The reasoning behind each decision — and the trade-offs deliberately taken — is in
 [NOTES.md](./NOTES.md).
 
-## Requirements
+## Prerequisites
 
-- Node 20+ (developed on 22.22)
-- pnpm 10+ (developed on 11.1)
-- Docker, for the Postgres container
+- **Node 20+** (developed on 22.22)
+- **pnpm 10+** (developed on 11.1) — `npm install -g pnpm`
+- **Docker, and Docker Desktop actually running.** `pnpm db:up` fails with
+  "cannot find the docker API" if the daemon is not started, which looks like a broken repo
+  rather than a stopped application.
 
-## Running it
+## Setup
 
 ```bash
 pnpm install
 cp packages/api/.env.example packages/api/.env
 
-pnpm db:up          # starts Postgres on host port 5433
+pnpm db:up          # Postgres on host port 5433
 pnpm db:migrate     # applies migrations
 pnpm db:seed        # loads the development dataset
 pnpm dev            # API on :3000, web on :5173
 ```
 
-Then open <http://localhost:5173>, pick a user from the switcher, and you have a balance, a
-catalogue and a history.
+Open <http://localhost:5173> and pick a user from the switcher.
 
-**Start with the developer panel at the bottom of the page.** Most of what this service
-actually does happens behind a signed webhook, and the panel is how you see it without
-hand-crafting an HMAC:
-
-- **Purchase / Referral / App review** send a genuinely signed partner event through the real
-  webhook route. The balance and history update.
-- **Survey (no rule)** is accepted with a 202 and credits nothing — it is parked as
-  `UNMATCHED / NO_RULE` and appears in the deliveries list with its reason. This is the case
-  where a partner is sending valid activity we have no pricing for.
-- **Replay the last event id** sends the same event twice. The second is answered 200 with
-  `duplicate: true` and moves no points.
-- **Ledger reconciliation** compares every cached balance against the sum of its ledger.
-
-To watch a redemption fail and refund itself, set `FULFILLMENT_FAILURE_RATE=1` in
-`packages/api/.env` and redeem something: the points are taken, fulfilment refuses, a
-`REVERSAL` entry is written, the stock unit is returned, and the balance comes back — all
-visible in the history.
-
-> On Windows, the two dev servers bind different address families, which matters only for
+> **On Windows**, the two dev servers bind different address families. This only affects
 > command-line tools — browsers fall back automatically:
 >
-> - **API directly:** use `http://127.0.0.1:3000`. Fastify binds `0.0.0.0` (IPv4 only), and
+> - **API directly:** `http://127.0.0.1:3000`. Fastify binds `0.0.0.0` (IPv4 only), and
 >   `localhost` resolves to the IPv6 loopback first.
-> - **Web, and the API through its proxy:** use `http://localhost:5173`. Vite binds
->   `localhost`, which here is IPv6 `::1`, so `127.0.0.1` is refused.
+> - **Web, and the API through its proxy:** `http://localhost:5173`. Vite binds `localhost`,
+>   which is IPv6 `::1` here, so `127.0.0.1` is refused.
 >
 > Either way the symptom is "connection refused" against a perfectly healthy server.
 
+## Start with the developer panel
+
+Most of what this service does happens behind a signed webhook. The panel at the bottom of
+the page is how to see it without hand-crafting an HMAC — every button signs a real payload
+and posts it to the real webhook route:
+
+| Button | What it demonstrates |
+| --- | --- |
+| Purchase / Referral / App review | A credit lands; balance and history update |
+| Survey (no rule) | Accepted **202**, credits nothing, parked `UNMATCHED / NO_RULE` |
+| Replay the last event id | Answered **200** with `duplicate: true`; no points move |
+| Ledger reconciliation | Every cached balance compared against the sum of its ledger |
+
+To watch a redemption fail and refund itself, set `FULFILLMENT_FAILURE_RATE=1` in
+`packages/api/.env` and redeem something. The points are taken, fulfilment refuses, a
+`REVERSAL` entry is written, the stock unit is returned, and the balance comes back — all
+visible in the history.
+
+## Sending a webhook by hand
+
+The signature is `HMAC-SHA256` over `${timestamp}.${rawBody}`, keyed with `WEBHOOK_SECRET`.
+
+```bash
+SECRET='local-development-webhook-secret'
+BODY='{"event_id":"evt_manual_1","user_ref":"acme-user-001","activity_type":"PURCHASE","occurred_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}'
+TS=$(date +%s)
+SIG=$(printf '%s.%s' "$TS" "$BODY" | openssl dgst -sha256 -hmac "$SECRET" -r | cut -d' ' -f1)
+
+curl -i -X POST http://127.0.0.1:3000/api/webhooks/acme \
+  -H 'content-type: application/json' \
+  -H "x-webhook-timestamp: $TS" \
+  -H "x-webhook-signature: $SIG" \
+  -d "$BODY"
+```
+
+**Run that exact command twice.** The first returns `202` with `"duplicate": false` and
+credits 15 points. The second returns `200` with `"duplicate": true` and moves nothing —
+because `event_id` is unchanged. That is the at-least-once guarantee: a partner may retry
+freely and cannot be charged twice for it.
+
+Change `event_id` and it credits again. Corrupt the signature by one character and it is
+`401`, unstored.
+
 ## Commands
 
-| Command           | What it does                                          |
-| ----------------- | ----------------------------------------------------- |
-| `pnpm dev`        | Runs the API and the web app together                  |
-| `pnpm test`       | Runs the Vitest suites (no database needed)             |
-| `pnpm test:db`    | Integration tests that need a running database          |
-| `pnpm typecheck`  | Typechecks every package                               |
-| `pnpm build`      | Compiles the API and builds the web bundle             |
-| `pnpm db:up`      | Starts Postgres via docker compose                     |
-| `pnpm db:down`    | Stops it                                               |
-| `pnpm db:migrate` | Applies Prisma migrations                              |
-| `pnpm db:reset`   | Drops and rebuilds the database                         |
-| `pnpm db:seed`    | Reloads the development dataset (clears tables first)   |
-| `pnpm db:studio`  | Opens Prisma Studio against the local database          |
-| `pnpm reconcile`  | Checks every cached balance against the ledger           |
+| Command | What it does |
+| --- | --- |
+| `pnpm dev` | Runs the API and the web app together |
+| `pnpm test` | Unit and component tests. **No database needed** |
+| `pnpm test:db` | Integration tests. Requires a running database |
+| `pnpm typecheck` | Typechecks every package |
+| `pnpm build` | Compiles the API and builds the web bundle |
+| `pnpm reconcile` | Checks every cached balance against the ledger. **Exits non-zero on drift** |
+| `pnpm db:up` / `db:down` | Starts / stops Postgres |
+| `pnpm db:migrate` | Applies Prisma migrations |
+| `pnpm db:reset` | Drops, re-migrates and re-seeds |
+| `pnpm db:seed` | Reloads the development dataset (clears tables first) |
+| `pnpm db:studio` | Prisma Studio against the local database |
+
+`pnpm reconcile` is the one to wire into CI or cron. It prints every user whose cached
+balance disagrees with the sum of their ledger and exits `1`, so a drift fails a pipeline
+rather than sitting in a log nobody reads. It never repairs: the ledger is authoritative, and
+silently rewriting a balance would destroy the evidence of whatever wrote it wrongly.
 
 ## Seeded data
 
-`pnpm db:seed` loads a dataset shaped around the states that are otherwise awkward to
-reach by clicking:
-
 | User | Balance | What they exercise |
 | --- | --- | --- |
-| Ada Lovelace | 355 | Full history: purchases priced by two different rule versions, a fulfilled redemption, and one that failed and was reversed |
-| Grace Hopper | 515 | A second, smaller history, so switching users shows different data |
-| Alan Turing | 0 | The empty state, which is a real screen and the one most likely to be broken by nobody looking at it |
+| Ada Lovelace | 355 | Purchases priced by two rule versions, a fulfilled redemption, and one that failed and was reversed |
+| Grace Hopper | 515 | A smaller history, so switching users shows different data |
+| Alan Turing | 0 | The empty state — a real screen, and the one most likely to be broken by nobody looking at it |
 
-There are also three deliveries that produced no ledger entry — one `UNMATCHED` for each
-reason (`NO_RULE`, `UNKNOWN_USER`) and one `REJECTED` with a genuinely malformed payload —
-and rewards from 50 to 25,000 points, so both a successful redemption and an
-insufficient-funds refusal are reachable without editing the database.
+Plus three deliveries that produced no ledger entry (one `UNMATCHED` per reason, one
+`REJECTED` with a malformed payload) and rewards from 50 to 25,000 points, so both a
+successful redemption and an insufficient-funds refusal are reachable without editing the
+database. The seed is destructive by design: it clears every table first, so re-running it
+always produces the same state.
 
-The seed is destructive: it clears every table first, so re-running it always produces the
-same state rather than a different one depending on how many times it has run.
+## API
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| POST | `/api/webhooks/:partner` | Partner activity. HMAC-signed; see above |
+| GET | `/api/me` | Acting user and balance. Needs `X-Demo-User` |
+| GET | `/api/me/transactions` | Ledger history, cursor-paginated. `?cursor=&limit=&type=` |
+| GET | `/api/rewards` | Catalogue, cheapest first, with `inStock` |
+| POST | `/api/redemptions` | Redeem. Needs `X-Demo-User` and `Idempotency-Key` |
+| GET | `/api/demo/users` | Users for the switcher. Stub auth only |
+| GET | `/api/health/live` | Liveness. Touches nothing external |
+| GET | `/api/health/ready` | Readiness. 200 if the database answers, else 503 |
+| POST | `/api/dev/simulate-activity` | Signs a real payload and posts it to the webhook |
+| GET | `/api/dev/deliveries` | Recent deliveries, including parked ones |
+| GET | `/api/dev/reconcile` | Balances vs. ledger. Empty is healthy |
+
+`/api/dev/*` is registered only when `NODE_ENV !== 'production'`, so those routes do not
+exist in a real deployment rather than existing behind a flag.
+
+Errors share one envelope, `{ error, message }`, where `error` is a machine-readable code.
+
+### Webhook status codes
+
+The status code is a control signal telling the partner whether to retry.
+
+| Situation | Code | Retry? | Why |
+| --- | --- | --- | --- |
+| New valid event, credited | 202 | No | Accepted. 202 so processing can become asynchronous without the contract changing |
+| Duplicate of a credited event | 200 | No | "You had this already" — the only difference a retry cares about |
+| Unknown user | 202 | No | Parked `UNMATCHED / UNKNOWN_USER`. Usually a signup race that resolves itself |
+| No matching rule | 202 | No | Parked `UNMATCHED / NO_RULE`. Our configuration gap, not their bad request |
+| Bad or stale signature | 401 | No | Not authenticated, and not stored |
+| Fails schema, or no `event_id` | 400 | No | Permanently invalid. Retrying cannot help |
+| `occurred_at` outside 90 days past / 1 hour future | 400 | No | Permanently invalid, same reason |
+| Rate limited | 429 | Yes | With `retry-after`. Transient |
+| Internal fault | 500 | Yes | Ours, probably transient. Marked `FAILED`; a retry reprocesses |
+
+**A duplicate is never 409.** On an at-least-once channel duplicates are normal operation,
+and most retry libraries read any 4xx as failure — a 409 would trip a partner's alerting for
+something that worked exactly as designed.
+
+### Redemption status codes
+
+`201` for a redemption this request created, `200` for a replay of one that already existed,
+with an **identical body** either way so a client that retried after a timeout can treat both
+the same. `409` for both refusals — `insufficient_points` and `out_of_stock` — with distinct
+codes, because they mean opposite things to a person.
 
 ## Layout
 
@@ -101,81 +176,32 @@ packages/
       schema.prisma        Models, relations, indexes
       migrations/          Including the CHECK and EXCLUDE constraints
     src/
-      app.ts               Plugin and route registration; builds without listening
-      index.ts             Boot and graceful shutdown
+      app.ts               Plugins, routes, rate limits, one error envelope
+      index.ts             Boot and graceful shutdown with a drain timeout
       env.ts               Environment validated once, at startup
-      seed-data.ts         The development dataset, as importable constants
-      seed.ts              Loads it, in one transaction
-      reconcile.ts         Checks balances against the ledger; exits non-zero on drift
+      seed.ts              Loads the dev dataset, in one transaction
+      reconcile.ts         Balances vs. ledger; exits non-zero on drift
       lib/db.ts            The Prisma client and the `Tx` transaction contract
+      plugins/auth.ts      The stubbed authentication seam
       modules/
-        health/            One directory per domain concept: routes + service
-        earning/           Rule-window resolution
-        ledger/            The only writer of point_transactions and user_balances
-        webhook/           Ingestion: signature, capture, process, backfill
-        user/              Balance reads and the demo switcher
-        reward/            The catalogue
+        ledger/            The ONLY writer of point_transactions and user_balances
+        webhook/           Signature, capture, process, backfill
+        earning/           Rule windows and pricing against occurredAt
         redemption/        Two-phase redemption and the fulfilment stub
-        dev/               Simulator, deliveries and reconcile. Not registered in production.
-      plugins/
-        auth.ts            The stubbed authentication seam
+        reward/            The catalogue
+        user/              Balance reads and transaction history
+        health/            Liveness and readiness
+        dev/               Simulator and inspection. Not registered in production
   web/                     React + Vite + TanStack Query + Tailwind
     src/
       App.tsx              Layout and the redemption flow
       components/          Balance, Rewards, History, RedeemDialog, DevPanel
       lib/
         api.ts             The single API client
-        redemption-copy.ts Per-error-code copy; the failed-fulfilment wording
+        redemption-copy.ts Per-error-code copy, including the refund wording
         toast.tsx          Minimal toast provider
 ```
 
 Each module owns one domain concept and exposes it through its service. Routes parse the
 request, call one service function, and choose a status code — anything worth testing lives
 in the service, where no HTTP layer is in the way.
-
-## Endpoints
-
-| Method | Path                 | Purpose                                             |
-| ------ | -------------------- | --------------------------------------------------- |
-| GET    | `/api/health/live`   | Liveness. Touches nothing external.                  |
-| GET    | `/api/health/ready`  | Readiness. 200 if the database answers, else 503.    |
-| POST   | `/api/webhooks/:partner` | Partner activity ingestion. HMAC-signed; see below. |
-| GET    | `/api/me`            | The acting user and their balance. Needs `X-Demo-User`. |
-| GET    | `/api/rewards`       | The catalogue, cheapest first, with `inStock`.       |
-| GET    | `/api/demo/users`    | Users for the demo switcher. Stub-auth only.        |
-| POST   | `/api/redemptions`   | Redeem a reward. Needs `X-Demo-User` and `Idempotency-Key`. |
-| GET    | `/api/me/transactions` | Ledger history, cursor-paginated. `?cursor=&limit=&type=` |
-| POST   | `/api/dev/simulate-activity` | Signs a real payload and posts it to the webhook. Dev only. |
-| GET    | `/api/dev/deliveries` | Recent deliveries, including parked ones. Dev only.  |
-| GET    | `/api/dev/reconcile` | Balances vs. ledger. Empty is healthy. Dev only.     |
-
-Everything is mounted under `/api`, health included, so the Vite dev proxy needs exactly one
-rule and the browser never makes a cross-origin request.
-
-### The webhook
-
-`POST /api/webhooks/acme` expects two headers and a JSON body:
-
-```
-x-webhook-timestamp: <unix seconds>
-x-webhook-signature: <hex HMAC-SHA256 of `${timestamp}.${rawBody}`, keyed with WEBHOOK_SECRET>
-```
-
-```json
-{
-  "event_id": "evt_1",
-  "user_ref": "acme-user-001",
-  "activity_type": "PURCHASE",
-  "occurred_at": "2026-09-06T10:00:00.000Z"
-}
-```
-
-`event_id` is required and is never synthesised — it is the key that makes a partner retry
-harmless. `occurred_at` must be within 90 days past and 1 hour future, and decides which
-version of the earning rule prices the event.
-
-The response status tells the partner whether to retry. The full table, with reasoning, is in
-[NOTES.md](./NOTES.md#10-ingestion): briefly, **202** accepted, **200** already processed,
-**400** permanently invalid, **401** not authenticated, **500** ours and worth retrying. A
-duplicate is never a 409 — on an at-least-once channel duplicates are normal operation, and a
-4xx would trip a partner's alerting for something that worked.
