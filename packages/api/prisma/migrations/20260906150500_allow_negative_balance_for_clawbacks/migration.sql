@@ -1,0 +1,52 @@
+-- Allow a balance to go negative, so a clawback can land.
+--
+-- WHY THIS CONSTRAINT IS BEING REMOVED
+--
+-- `CHECK (balance >= 0)` encoded the claim "a balance is never negative". The
+-- reversal rules make that claim false, so the constraint was wrong rather than
+-- the requirement being wrong.
+--
+-- The case is a credit that should never have been granted — a fraudulent or
+-- mistaken earn — discovered after the user has already spent it. Reversing it
+-- necessarily takes the balance below zero. The alternative is refusing the
+-- clawback and leaving a wrongly positive balance on the books, which is the
+-- worse of the two outcomes by a wide margin: a negative balance is honest and
+-- recoverable, because the user earns their way out of it and the ledger
+-- explains exactly why it happened. A wrongly positive one is indistinguishable
+-- from points that were legitimately earned, so nobody can ever tell it apart
+-- afterwards, and it stays wrong forever.
+--
+-- Discovered by a test rather than in review: `reverseEntry` passes
+-- `enforceNonNegative: false` specifically for this case, and the constraint
+-- made that flag unreachable in the exact scenario it exists for. The test
+-- failed with a 23514 on a -400 balance.
+--
+-- WHAT STILL PREVENTS AN OVERDRAWN SPEND
+--
+-- The guarantee that a *spend* cannot overdraw has not been weakened, only
+-- moved to where it can distinguish a spend from a correction — which a
+-- row-level CHECK constraint cannot do, since it sees a number and not the
+-- intent behind it.
+--
+-- `appendEntry` takes the balance row lock with SELECT ... FOR UPDATE before it
+-- reads the balance, computes the resulting value, and refuses the write when
+-- `enforceNonNegative` is set and the result would be negative. Holding the
+-- lock across the read and the write is what makes that race-free: a
+-- concurrent debit cannot slip between the check and the update, which is the
+-- failure a CHECK constraint would have caught and is now prevented earlier.
+--
+-- What is genuinely given up is a backstop against a bug inside
+-- `ledger.service.ts` itself, or against someone writing `user_balances` from a
+-- psql prompt. That is narrower than it sounds, because that file is by rule
+-- the only writer of the table, but it is a real reduction and worth naming
+-- rather than glossing over.
+--
+-- Rejected alternative: a trigger enforcing the floor unless a transaction sets
+-- a session variable to opt out. It would have kept a database-level backstop
+-- against every writer while still letting clawbacks through. It was turned
+-- down because a trigger is control flow that does not appear anywhere in the
+-- service you are reading, and being able to follow these flows top to bottom
+-- is worth more here than the backstop it would preserve.
+
+ALTER TABLE "user_balances"
+    DROP CONSTRAINT "user_balances_balance_non_negative";

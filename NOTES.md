@@ -112,7 +112,9 @@ inside that window is harmless.
 - The balance row is materialised with `INSERT … ON CONFLICT DO NOTHING` *before* it is
   locked. `FOR UPDATE` locks nothing when the row does not exist yet, so without this a
   user's first two concurrent events would both sail through.
-- `CHECK (balance >= 0)` as a structural backstop under the application's funds check.
+- The non-negative guarantee lives in `appendEntry`, under that lock. It started as a
+  `CHECK (balance >= 0)` backstop as well; that constraint was dropped once it turned out to
+  block legitimate clawbacks. See §9.
 - Stock uses the conditional form — `UPDATE rewards SET stock = stock - 1 WHERE id = ? AND
   stock > 0` — and checks affected rows, so overselling is impossible without a read-modify-
   write race to lose.
@@ -293,7 +295,6 @@ matters.
 
 | Constraint | Guards against |
 | --- | --- |
-| `user_balances_balance_non_negative` | Points spent that were never earned |
 | `point_transactions_delta_non_zero` | Entries that record nothing |
 | `point_transactions_delta_sign_matches_type` | An `EARN` that drains a balance |
 | `earning_rules_no_overlapping_windows` | Ambiguous pricing (EXCLUDE, GiST) |
@@ -346,6 +347,98 @@ committing — the same property `reconcile()` will check in production, applied
 to the data it just wrote.
 
 ---
+
+## 9. The ledger service
+
+`ledger.service.ts` is the only file permitted to write `point_transactions` or
+`user_balances`. Redemption, the webhook and the seed all reach points through
+`appendEntry`. The seed included — a seed script writing those tables directly would make
+the rule *mostly* true, which is the same as not true, because the whole value of the rule
+is being able to rely on it. The useful side effect is that seeding exercises the real
+path: the same lock, the same dedupe claim, the same arithmetic.
+
+### Order of operations: lock, claim, check, move
+
+`appendEntry` takes the balance row lock before it does anything else, for two reasons that
+are easy to miss.
+
+**It makes the lock ordering invariant total rather than partial.** The balance is the first
+lock *any* flow acquires, so there is no ordering to compare between flows and no cycle to
+deadlock on. Claiming the ledger row first would mean `appendEntry` takes a unique-index
+lock before the balance while redemption takes the balance before rewards — and mixed
+orderings across resources are exactly where deadlocks come from.
+
+**The affordability check must come after the duplicate check, not before.** A retried
+redemption proves it: the user spent 250 from a balance of 300, so the retry arrives when
+only 50 remain. Checking affordability first would reject that retry with
+`InsufficientPointsError` when the correct answer is `duplicate: true` and no movement at
+all — a false failure reported for a request that had already succeeded. There is a test
+pinning this exact sequence.
+
+Holding the lock across both also means the duplicate path can report the balance it is
+already holding, rather than re-reading a value that could have moved.
+
+### Reversal is idempotent through the ordinary mechanism
+
+`reverseEntry` does not get a special idempotency scheme. The reversal is written with
+`(source, externalEventId) = ('reversal', originalId)`, so the ledger's own unique
+constraint makes a second call a no-op. A retried failure handler cannot refund twice. The
+unique index on `reverses_id` is a second, independent guard on the same property.
+
+Reversals are new rows, never edits. A failed fulfilment is something that happened, and
+editing the original debit away would leave a balance nobody can explain from the rows.
+
+### The non-negative balance constraint was dropped, deliberately
+
+`CHECK (balance >= 0)` was in the first migration, justified as defence in depth under the
+application's funds check. It had to go, and finding out why was the most useful thing to
+come out of this phase.
+
+`reverseEntry` passes `enforceNonNegative: false` so that clawing back a credit that should
+never have been granted lands even when the user has already spent it. The constraint made
+that flag unreachable in the exact scenario it exists for — the test failed with a 23514 on
+a `-400` balance.
+
+The constraint encoded the claim "a balance is never negative", and the clawback rule
+establishes that claim is false. So the constraint was wrong, not the requirement. A
+row-level CHECK sees a number and not the intent behind it, so it cannot distinguish an
+overdrawn spend from a correction. Refusing the clawback would leave a wrongly positive
+balance, and that is the worse outcome by a wide margin: a negative balance is honest and
+recoverable, because the user earns their way out of it and the ledger says exactly why. A
+wrongly positive one is indistinguishable from points that were legitimately earned, so
+nobody can ever tell it apart afterwards.
+
+What still prevents an overdrawn spend is the check in `appendEntry`, which runs while the
+caller holds the balance row lock — so a concurrent debit cannot slip between the check and
+the write. What is genuinely given up is a backstop against a bug inside `ledger.service.ts`
+itself, or against someone editing `user_balances` from a psql prompt. That is narrower than
+it sounds, since that file is by rule the only writer, but it is a real reduction rather
+than a free win.
+
+A trigger enforcing the floor unless a transaction opted out with a session variable would
+have kept a database-level backstop against every writer while still letting clawbacks
+through. It was rejected because a trigger is control flow that appears nowhere in the
+service you are reading, and following these flows top to bottom is worth more here than the
+backstop it would preserve.
+
+### `appendEntry` must run inside a transaction
+
+`Tx` is structurally satisfied by `PrismaClient`, so nothing stops a caller passing `prisma`
+directly. That is deliberate and useful for read-only paths, and wrong here: between the
+ledger insert and the balance update `appendEntry` is briefly inconsistent, and only the
+caller's transaction hides it. The integration tests call it inside `prisma.$transaction`
+for exactly that reason, so they would also catch a change that broke the assumption.
+
+### `reconcile` ships three ways
+
+As a function, as `pnpm reconcile` (non-zero exit on drift, so it works as a cron job or a
+deploy gate), and as a test. The test has a positive control that corrupts a balance and
+asserts the drift is detected, because a "no problems found" check that always returns
+nothing passes every test you would think to write for it.
+
+`reconcile` never repairs. The ledger is authoritative, so the fix is always to rewrite the
+cache from it — but doing that automatically would destroy the evidence of whatever wrote a
+balance it should not have.
 
 ## Smaller choices
 

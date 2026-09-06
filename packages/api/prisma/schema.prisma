@@ -195,10 +195,18 @@ model PointTransaction {
 model UserBalance {
   userId String @id @map("user_id")
 
-  /// Guarded by CHECK (balance >= 0) in the migration, underneath the
-  /// application's own funds check. The application check produces a good error
-  /// message; this one makes a negative balance impossible even if that check is
-  /// bypassed by a bug.
+  /// May go negative, and there is no CHECK constraint preventing it.
+  ///
+  /// One was dropped deliberately — see the migration
+  /// `allow_negative_balance_for_clawbacks`. Reversing a credit that should
+  /// never have been granted, after the user has already spent it, has to
+  /// succeed, and a row-level constraint sees a number rather than the intent
+  /// behind it, so it cannot tell that correction apart from an overdrawn
+  /// spend. Refusing the clawback would leave a wrongly positive balance, which
+  /// is the unrecoverable outcome of the two.
+  ///
+  /// An overdrawn *spend* is still prevented, in `ledger.appendEntry`, under the
+  /// row lock taken by `lockBalance`.
   balance Int @default(0)
 
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)

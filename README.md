@@ -53,7 +53,8 @@ finished starting.
 | `pnpm db:migrate` | Applies Prisma migrations                              |
 | `pnpm db:reset`   | Drops and rebuilds the database                         |
 | `pnpm db:seed`    | Reloads the development dataset (clears tables first)   |
-| `pnpm db:studio`  | Opens Prisma Studio against the local database         |
+| `pnpm db:studio`  | Opens Prisma Studio against the local database          |
+| `pnpm reconcile`  | Checks every cached balance against the ledger           |
 
 ## Seeded data
 
@@ -88,10 +89,12 @@ packages/
       env.ts               Environment validated once, at startup
       seed-data.ts         The development dataset, as importable constants
       seed.ts              Loads it, in one transaction
+      reconcile.ts         Checks balances against the ledger; exits non-zero on drift
       lib/db.ts            The Prisma client and the `Tx` transaction contract
       modules/
         health/            One directory per domain concept: routes + service
         earning/           Rule-window resolution
+        ledger/            The only writer of point_transactions and user_balances
   web/                     React + Vite + TanStack Query + Tailwind
     src/
       lib/api.ts           The single API client

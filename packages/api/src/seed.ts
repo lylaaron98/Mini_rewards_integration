@@ -1,8 +1,8 @@
 import { TransactionType } from '@prisma/client'
-import type { Prisma } from '@prisma/client'
 
 import { prisma } from './lib/db.js'
 import type { Tx } from './lib/db.js'
+import { REVERSAL_SOURCE, appendEntry, reconcile } from './modules/ledger/ledger.service.js'
 import {
   LEDGER_SOURCE,
   PARTNER,
@@ -26,83 +26,17 @@ import {
  */
 
 /**
- * Writes one ledger entry and moves the cached balance with it.
+ * Every ledger write in this file goes through `ledger.appendEntry`, like every
+ * other caller in the codebase. `ledger.service.ts` is the only file permitted
+ * to write `point_transactions` or `user_balances`, and a seed script writing
+ * them directly would make that rule a thing that is mostly true — which is the
+ * same as not true, since the value of the rule is being able to rely on it.
  *
- * This mirrors what `ledger.appendEntry` will do in Phase 2, and it exists
- * mostly so the seed exercises the same invariant the application will: the
- * balance is written in the same transaction as the row that changes it, and
- * `CHECK (balance >= 0)` is therefore evaluated at every intermediate step
- * rather than only against the final total. Seeding a history that dips
- * negative in the middle fails here rather than passing quietly.
- *
- * Phase 2 replaces this with a call to the real ledger service.
+ * The useful side effect is that seeding exercises the real code path: the
+ * balance lock, the dedupe claim and the same balance arithmetic the webhook
+ * will use. A seed that reimplemented those would be a second implementation to
+ * keep in step, and the first place a divergence would hide.
  */
-async function appendSeedEntry(
-  tx: Tx,
-  entry: {
-    userId: string
-    delta: number
-    type: TransactionType
-    description: string
-    createdAt: Date
-    externalEventId?: string
-    redemptionId?: string
-    ruleId?: string
-    reversesId?: string
-    // Prisma's own JSON input type rather than Record<string, unknown>: the
-    // latter permits values Postgres cannot store, and the mismatch would
-    // surface at runtime instead of here.
-    metadata?: Prisma.InputJsonObject
-  },
-): Promise<{ id: string }> {
-  const created = await tx.pointTransaction.create({
-    data: {
-      userId: entry.userId,
-      delta: entry.delta,
-      type: entry.type,
-      source: entry.type === TransactionType.EARN ? LEDGER_SOURCE : 'system',
-      externalEventId: entry.externalEventId ?? null,
-      redemptionId: entry.redemptionId ?? null,
-      ruleId: entry.ruleId ?? null,
-      reversesId: entry.reversesId ?? null,
-      description: entry.description,
-      metadata: entry.metadata ?? undefined,
-      createdAt: entry.createdAt,
-    },
-    select: { id: true },
-  })
-
-  // Materialise the row at zero, then move it. Two statements rather than one
-  // upsert carrying the delta, for a reason that is not obvious:
-  //
-  // PostgreSQL evaluates CHECK constraints against the tuple an INSERT proposes
-  // *before* it detects the unique-key conflict that would divert it to the
-  // update path. So `create: { balance: -250 }` is rejected by
-  // CHECK (balance >= 0) even when the row already exists and only the
-  // increment would ever have run. The first debit against an existing balance
-  // fails with a constraint error describing a row that was never going to be
-  // written.
-  //
-  // Inserting zero always satisfies the constraint, and the increment that
-  // follows is checked against the real resulting value. This is the same
-  // pattern the ledger service uses, where it is needed for a second reason as
-  // well: FOR UPDATE locks nothing when the row does not yet exist, so the row
-  // has to be made to exist before it can be locked.
-  await tx.userBalance.upsert({
-    where: { userId: entry.userId },
-    create: { userId: entry.userId, balance: 0 },
-    update: {},
-  })
-
-  // `increment` keeps the arithmetic in the database rather than
-  // read-modify-writing a value another writer could have changed underneath.
-  await tx.userBalance.update({
-    where: { userId: entry.userId },
-    data: { balance: { increment: entry.delta } },
-  })
-
-  return created
-}
 
 async function seed(tx: Tx): Promise<void> {
   // Deleted in dependency order: ledger entries reference redemptions, rules and
@@ -187,14 +121,15 @@ async function seed(tx: Tx): Promise<void> {
         },
       })
 
-      await appendSeedEntry(tx, {
+      await appendEntry(tx, {
         userId,
         delta: points,
         type: TransactionType.EARN,
-        description: entry.description,
-        createdAt: entry.occurredAt,
+        source: LEDGER_SOURCE,
         externalEventId: entry.eventId,
         ruleId,
+        description: entry.description,
+        createdAt: entry.occurredAt,
         // The ledger has no occurredAt column: when something happened is a fact
         // about the partner's event, not about our accounting entry. Keeping it
         // here preserves the provenance without implying the ledger is ordered
@@ -231,13 +166,17 @@ async function seed(tx: Tx): Promise<void> {
       select: { id: true },
     })
 
-    const debit = await appendSeedEntry(tx, {
+    // No externalEventId: a spend has no partner event behind it, and Postgres
+    // treats NULLs as distinct, so these always insert. Idempotency for a
+    // redemption is carried by the Idempotency-Key on the Redemption row.
+    const debit = await appendEntry(tx, {
       userId,
       delta: -reward.costPoints,
       type: TransactionType.REDEEM,
+      source: 'redemption',
+      redemptionId: redemption.id,
       description: `Redeemed ${reward.name}`,
       createdAt: entry.occurredAt,
-      redemptionId: redemption.id,
     })
 
     // Stock moves with the reservation, exactly as the real flow does: held on
@@ -254,14 +193,24 @@ async function seed(tx: Tx): Promise<void> {
     // a new entry that reverses the old one — never an edit to it, and never a
     // delete. The ledger stays a record of what happened, including the part
     // that went wrong.
-    await appendSeedEntry(tx, {
+    //
+    // Shaped exactly as `ledger.reverseEntry` would shape it — same source, same
+    // dedupe key, same reversesId — but written through appendEntry directly
+    // because reverseEntry dates its output now, and this history needs to be
+    // backdated to look like something that happened last week.
+    const reason = entry.failureReason ?? 'fulfilment failed'
+    await appendEntry(tx, {
       userId,
       delta: reward.costPoints,
       type: TransactionType.REVERSAL,
-      description: `Refund: ${reward.name} could not be fulfilled`,
-      createdAt: new Date(entry.occurredAt.getTime() + 2_000),
+      source: REVERSAL_SOURCE,
+      externalEventId: debit.transactionId,
+      reversesId: debit.transactionId,
       redemptionId: redemption.id,
-      reversesId: debit.id,
+      description: `Reversal: ${reason}`,
+      createdAt: new Date(entry.occurredAt.getTime() + 2_000),
+      metadata: { reversedTransactionId: debit.transactionId, reason },
+      enforceNonNegative: false,
     })
 
     if (reward.stock !== null) {
@@ -291,30 +240,23 @@ async function seed(tx: Tx): Promise<void> {
 /**
  * Proves the cache agrees with the ledger before the seed is allowed to commit.
  *
- * This is the same property `reconcile()` will check in production, applied to
- * the data this script just wrote. A seed that produces an inconsistent balance
- * would make every later test suspect, and the failure would surface somewhere
- * far from here.
+ * Uses the real `reconcile()` rather than a check written for the seed, so the
+ * seed is validated by the same query that will run in production. Inconsistent
+ * data would make every later test suspect, and the failure would surface a long
+ * way from the cause.
+ *
+ * Running it inside the transaction means a bad seed rolls back rather than
+ * landing and then being reported.
  */
 async function verifyBalancesMatchLedger(tx: Tx): Promise<void> {
-  const ledgerTotals = await tx.pointTransaction.groupBy({
-    by: ['userId'],
-    _sum: { delta: true },
-  })
-  const balances = await tx.userBalance.findMany({ select: { userId: true, balance: true } })
+  const discrepancies = await reconcile(tx)
 
-  const balanceByUser = new Map(balances.map((row) => [row.userId, row.balance]))
+  if (discrepancies.length > 0) {
+    const detail = discrepancies
+      .map((row) => `${row.displayName}: ledger ${row.ledgerBalance}, cached ${row.cachedBalance}`)
+      .join('; ')
 
-  for (const total of ledgerTotals) {
-    const expected = total._sum.delta ?? 0
-    const actual = balanceByUser.get(total.userId) ?? 0
-
-    if (expected !== actual) {
-      throw new Error(
-        `Seed produced an inconsistent balance for user ${total.userId}: ` +
-          `ledger sums to ${expected}, cached balance is ${actual}`,
-      )
-    }
+    throw new Error(`Seed produced balances that disagree with the ledger — ${detail}`)
   }
 }
 

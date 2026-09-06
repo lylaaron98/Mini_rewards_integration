@@ -19,6 +19,7 @@
     "db:migrate": "pnpm --filter @rewards/api db:migrate",
     "db:reset": "pnpm --filter @rewards/api db:reset",
     "db:seed": "pnpm --filter @rewards/api db:seed",
+    "reconcile": "pnpm --filter @rewards/api reconcile",
     "db:studio": "pnpm --filter @rewards/api db:studio"
   },
   "devDependencies": {

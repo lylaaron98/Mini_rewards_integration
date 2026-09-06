@@ -15,6 +15,7 @@
     "db:migrate": "prisma migrate dev",
     "db:reset": "prisma migrate reset --force",
     "db:seed": "prisma db seed",
+    "reconcile": "tsx --env-file=.env src/reconcile.ts",
     "db:studio": "prisma studio"
   },
   "prisma": {
