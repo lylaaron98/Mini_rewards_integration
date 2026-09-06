@@ -32,6 +32,15 @@ import {
  * worker to find.
  */
 
+/**
+ * The NUL character, constructed rather than written as a literal.
+ *
+ * PostgreSQL cannot store one in `text` or `jsonb` at all, so it has to be
+ * detected — but writing it into source, even as an escape, is fragile enough
+ * that building it is worth the one line.
+ */
+const NUL = String.fromCharCode(0)
+
 // ---------------------------------------------------------------------------
 // Capture
 // ---------------------------------------------------------------------------
@@ -183,6 +192,26 @@ export async function processDelivery(tx: Tx, deliveryId: string): Promise<Proce
     return reject(tx, deliveryId, `Schema validation failed — ${detail}`)
   }
 
+  /**
+   * PostgreSQL cannot store a NUL character in `text` or `jsonb` — not as an
+   * encoding preference, but at all.
+   *
+   * A payload carrying one therefore fails on INSERT rather than on validation,
+   * which surfaces as a 500. That tells the partner to retry, the retry fails
+   * identically, and the delivery is wedged in a loop that can never succeed.
+   * Catching it here makes it what it actually is: permanently invalid input,
+   * answered 400 and recorded once.
+   *
+   * Checked on the DECODED value rather than on the raw bytes, because JSON can
+   * smuggle a NUL through a backslash-u-0000 escape: six perfectly ordinary
+   * characters, with no NUL byte in the body for a scan of the raw text to find.
+   * The route rejects the literal-byte form before capture, since that one
+   * cannot even be stored as evidence.
+   */
+  if (containsNul(parsed.data)) {
+    return reject(tx, deliveryId, 'Payload contains a NUL character, which cannot be stored.')
+  }
+
   const event = parsed.data
   const occurredAt = new Date(event.occurred_at)
 
@@ -285,6 +314,29 @@ export async function processDelivery(tx: Tx, deliveryId: string): Promise<Proce
     balanceAfter: entry.balanceAfter,
     alreadyCredited: entry.duplicate,
   }
+}
+
+/**
+ * Walks decoded values looking for a NUL character.
+ *
+ * Deliberately not `JSON.stringify(value).includes(...)`: `stringify` re-escapes
+ * a NUL back into its six-character form, so searching the serialised text for
+ * an actual NUL never matches and the check silently passes everything. That was
+ * the first version of this, and it looked correct.
+ *
+ * `metadata` is arbitrary partner-supplied JSON, so the walk has to recurse
+ * rather than checking the known fields.
+ */
+function containsNul(value: unknown): boolean {
+  if (typeof value === 'string') return value.includes(NUL)
+
+  if (Array.isArray(value)) return value.some(containsNul)
+
+  if (value !== null && typeof value === 'object') {
+    return Object.entries(value).some(([key, nested]) => containsNul(key) || containsNul(nested))
+  }
+
+  return false
 }
 
 async function reject(tx: Tx, deliveryId: string, error: string): Promise<ProcessOutcome> {

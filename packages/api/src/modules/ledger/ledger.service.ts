@@ -331,7 +331,21 @@ export async function appendEntry(tx: Tx, input: AppendEntryInput): Promise<Appe
 
   const balanceAfter = balanceBefore + input.delta
 
-  if (enforceNonNegative && balanceAfter < 0) {
+  /**
+   * Refuses a DEBIT that overdraws — never a credit.
+   *
+   * The `input.delta < 0` half is load-bearing and its absence was a real bug.
+   * Testing only whether the *result* is negative also rejects credits once the
+   * balance is already below zero, which strands a clawed-back user
+   * permanently: every subsequent partner event is refused and the webhook
+   * answers 500 forever. That directly contradicts the reason negative balances
+   * are allowed at all — the user is supposed to be able to earn their way out
+   * of the hole, and the ledger explains why they are in it.
+   *
+   * A credit is never a reason to refuse. It can only ever move the balance
+   * toward zero.
+   */
+  if (enforceNonNegative && input.delta < 0 && balanceAfter < 0) {
     throw new InsufficientPointsError(input.userId, balanceBefore, Math.abs(input.delta))
   }
 

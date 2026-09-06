@@ -40,6 +40,16 @@ const environmentSchema = z.object({
    */
   WEBHOOK_PARTNER: z.string().min(1).default('acme'),
   WEBHOOK_SECRET: z.string().min(16, 'WEBHOOK_SECRET must be at least 16 characters'),
+
+  /**
+   * Probability that the stubbed fulfilment provider fails, 0 to 1.
+   *
+   * Defaults to 0 so tests and demos are deterministic unless someone asks for
+   * chaos. Set it to something like 0.3 to watch the compensating reversal path
+   * actually run — a failure branch nobody exercises is a failure branch that
+   * does not work.
+   */
+  FULFILLMENT_FAILURE_RATE: z.coerce.number().min(0).max(1).default(0),
 })
 
 const parsed = environmentSchema.safeParse(process.env)

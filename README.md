@@ -96,6 +96,11 @@ packages/
         earning/           Rule-window resolution
         ledger/            The only writer of point_transactions and user_balances
         webhook/           Ingestion: signature, capture, process, backfill
+        user/              Balance reads and the demo switcher
+        reward/            The catalogue
+        redemption/        Two-phase redemption and the fulfilment stub
+      plugins/
+        auth.ts            The stubbed authentication seam
   web/                     React + Vite + TanStack Query + Tailwind
     src/
       lib/api.ts           The single API client
@@ -113,6 +118,10 @@ in the service, where no HTTP layer is in the way.
 | GET    | `/api/health/live`   | Liveness. Touches nothing external.                  |
 | GET    | `/api/health/ready`  | Readiness. 200 if the database answers, else 503.    |
 | POST   | `/api/webhooks/:partner` | Partner activity ingestion. HMAC-signed; see below. |
+| GET    | `/api/me`            | The acting user and their balance. Needs `X-Demo-User`. |
+| GET    | `/api/rewards`       | The catalogue, cheapest first, with `inStock`.       |
+| GET    | `/api/demo/users`    | Users for the demo switcher. Stub-auth only.        |
+| POST   | `/api/redemptions`   | Redeem a reward. Needs `X-Demo-User` and `Idempotency-Key`. |
 
 Everything is mounted under `/api`, health included, so the Vite dev proxy needs exactly one
 rule and the browser never makes a cross-origin request.

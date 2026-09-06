@@ -284,6 +284,77 @@ describe('reverseEntry', () => {
     expect(credit.transactionId).not.toBe(spend.transactionId)
   })
 
+  /**
+   * Regression: a user in the hole must be able to earn their way out.
+   *
+   * That is the entire justification for allowing negative balances — a
+   * clawback lands, the ledger explains why, and the user earns back to zero.
+   * A guard that refuses any entry whose *result* is negative refuses credits
+   * too, which strands the user permanently: every subsequent partner event is
+   * rejected, and the webhook answers 500 forever.
+   *
+   * `enforceNonNegative` is about refusing a DEBIT that overdraws, never about
+   * refusing a credit.
+   */
+  it('accepts a credit into a negative balance', async () => {
+    const userId = await createTestUser()
+
+    const fraudulent = await prisma.$transaction((tx) =>
+      appendEntry(tx, {
+        userId,
+        delta: 100,
+        type: TransactionType.EARN,
+        source: 'partner:test',
+        externalEventId: `evt-${randomUUID()}`,
+        description: 'Credit that should not have been granted',
+      }),
+    )
+
+    await prisma.$transaction((tx) =>
+      appendEntry(tx, {
+        userId,
+        delta: -100,
+        type: TransactionType.REDEEM,
+        source: 'redemption',
+        externalEventId: `spend-${randomUUID()}`,
+        description: 'Spent it',
+      }),
+    )
+
+    await prisma.$transaction((tx) =>
+      reverseEntry(tx, fraudulent.transactionId, 'fraudulent activity'),
+    )
+
+    expect((await prisma.userBalance.findUnique({ where: { userId } }))?.balance).toBe(-100)
+
+    // Earning out of the hole. Default enforceNonNegative, an ordinary credit.
+    const earned = await prisma.$transaction((tx) =>
+      appendEntry(tx, {
+        userId,
+        delta: 40,
+        type: TransactionType.EARN,
+        source: 'partner:test',
+        externalEventId: `evt-${randomUUID()}`,
+        description: 'Earning back',
+      }),
+    )
+
+    expect(earned.balanceAfter).toBe(-60)
+
+    // A debit that deepens the hole is still refused.
+    await expect(
+      prisma.$transaction((tx) =>
+        appendEntry(tx, {
+          userId,
+          delta: -10,
+          type: TransactionType.REDEEM,
+          source: 'redemption',
+          description: 'Still cannot spend',
+        }),
+      ),
+    ).rejects.toBeInstanceOf(InsufficientPointsError)
+  })
+
   it('rejects a reversal of an entry that does not exist', async () => {
     await expect(
       prisma.$transaction((tx) => reverseEntry(tx, randomUUID(), 'nope')),

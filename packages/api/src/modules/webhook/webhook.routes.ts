@@ -88,6 +88,25 @@ export async function webhookRoutes(app: FastifyInstance): Promise<void> {
         })
       }
 
+      /**
+       * A literal NUL byte cannot be stored in a Postgres `text` column, so this
+       * body cannot be captured even as evidence — the insert itself would fail
+       * and answer 500, inviting a retry that fails identically forever.
+       *
+       * Answered 400 without persisting, which is the honest description: the
+       * request is permanently invalid and there is nowhere to put it. The
+       * escaped form — a backslash-u-0000 sequence inside a JSON string —
+       * survives capture and is caught during validation instead.
+       */
+      if (rawBody.includes('\u0000')) {
+        request.log.warn({ partner }, 'webhook body contains a NUL byte and cannot be stored')
+
+        return reply.status(400).send({
+          error: 'invalid_payload',
+          message: 'Body contains a NUL byte, which cannot be stored.',
+        })
+      }
+
       // Capture and process are separate transactions. If they shared one, an
       // error during processing would roll back the record that anything ever
       // arrived, leaving nothing for a retry or a worker to pick up.
@@ -111,8 +130,26 @@ export async function webhookRoutes(app: FastifyInstance): Promise<void> {
         })
       }
 
-      const outcome = await processDelivery(prisma, capture.deliveryId).catch(
-        async (error: unknown) => {
+      /**
+       * Crediting runs inside a transaction, and passing `prisma` here instead
+       * was a real bug rather than a stylistic slip.
+       *
+       * `appendEntry` reads the balance under `SELECT ... FOR UPDATE` and then
+       * writes an absolute value. With no surrounding transaction every
+       * statement autocommits, so the row lock is released the moment the SELECT
+       * finishes and nothing spans the read-modify-write — the exact lost update
+       * the lock exists to prevent. Two concurrent events for one user each read
+       * the old balance and the second write erases the first, destroying
+       * points that the ledger still records.
+       *
+       * `Tx` is structurally satisfied by `PrismaClient`, which is deliberate
+       * for read-only paths and is why this compiled silently. The regression
+       * test posts eight concurrent distinct events and asserts the cached
+       * balance equals the ledger sum.
+       */
+      const outcome = await prisma
+        .$transaction((tx) => processDelivery(tx, capture.deliveryId))
+        .catch(async (error: unknown) => {
           /**
            * Recorded in its own transaction, because the one that just threw is
            * rolled back and cannot write anything. FAILED rather than REJECTED:
@@ -127,8 +164,7 @@ export async function webhookRoutes(app: FastifyInstance): Promise<void> {
             },
           })
           throw error
-        },
-      )
+        })
 
       return reply
         .status(statusCodeFor(outcome.status, false))

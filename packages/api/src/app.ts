@@ -4,7 +4,11 @@ import rawBody from 'fastify-raw-body'
 
 import { env } from './env.js'
 import { healthRoutes } from './modules/health/health.routes.js'
+import { redemptionRoutes } from './modules/redemption/redemption.routes.js'
+import { rewardRoutes } from './modules/reward/reward.routes.js'
+import { demoRoutes, userRoutes } from './modules/user/user.routes.js'
 import { webhookRoutes } from './modules/webhook/webhook.routes.js'
+import { applyAuth } from './plugins/auth.js'
 
 /**
  * Builds the server without starting it.
@@ -43,10 +47,20 @@ export async function buildApp(): Promise<FastifyInstance> {
     runFirst: true,
   })
 
+  // Applied to the root instance so every route can read request.user. It only
+  // resolves an identity and never rejects; routes that require one opt in with
+  // requireUser, so the webhook is not forced to invent an acting user it does
+  // not have.
+  applyAuth(app)
+
   // Every route lives under /api, health included, so the Vite dev proxy needs
   // exactly one rule and there is no second origin for a browser to refuse.
   await app.register(healthRoutes, { prefix: '/api/health' })
   await app.register(webhookRoutes, { prefix: '/api/webhooks' })
+  await app.register(userRoutes, { prefix: '/api' })
+  await app.register(demoRoutes, { prefix: '/api/demo' })
+  await app.register(rewardRoutes, { prefix: '/api/rewards' })
+  await app.register(redemptionRoutes, { prefix: '/api/redemptions' })
 
   /**
    * Fastify's built-in 404 does not pass through `setErrorHandler`, so without

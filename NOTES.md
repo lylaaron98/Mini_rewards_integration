@@ -559,6 +559,134 @@ The whole backfill runs in the caller's transaction, so it is all-or-nothing. Th
 right trade at this scale — a partially applied backfill is harder to reason about than a
 failed one — but at real volume it would need chunking, each chunk its own transaction.
 
+## 11. Reads, and the authentication seam
+
+Authentication is stubbed. An `X-Demo-User` header names the acting user, there are no
+passwords or sessions, and anyone who can reach the API can act as anyone.
+
+That is a conscious cut. Building real authentication would have consumed the time that went
+into the ledger and the redemption path and demonstrated nothing about the problem this
+exercise is actually about. What makes it defensible is that it is a **single seam**: every
+route reads `request.user` and no route knows where that came from, so real sessions mean
+changing one hook in [`plugins/auth.ts`](packages/api/src/plugins/auth.ts) and nothing else.
+
+Resolving an identity is separate from requiring one. The hook only says who is asking and
+never rejects; routes that need an identity opt in with `requireUser`. The webhook has no
+acting user at all and must not be forced to invent one.
+
+A header naming somebody we do not have is treated exactly like no header — both are 401.
+Distinguishing them would turn the endpoint into a way to enumerate which user references
+exist.
+
+`GET /api/me` reads the balance from `user_balances`, not from `SUM(delta)`. This is the most
+frequent read in the application and the ledger only grows; one indexed row lookup does not
+get slower. That is the payoff for writing the cache in the same transaction as the ledger
+row, and `reconcile()` is what makes relying on it defensible rather than hopeful.
+
+`GET /api/rewards` returns `inStock` rather than a stock count. The client never learns that
+`stock === null` means unlimited — a rule that, reimplemented client-side, eventually gets
+inverted and shows an unlimited reward as sold out. It also keeps inventory levels out of a
+public response. The flag is advisory: between reading it and redeeming, the last unit can
+go, which is why redemption decrements with a conditional UPDATE rather than trusting it.
+
+## 12. Redemption
+
+The only operation that destroys value. It has to survive being called twice, called
+concurrently, and called again by a client that timed out and genuinely cannot tell whether
+the first attempt worked.
+
+### Phase 1, one transaction
+
+1. **Read the reward inside the transaction.** A price read outside could be stale by the
+   time the debit runs, and the user would be charged an amount that matched neither what
+   they were shown nor what the receipt records.
+2. **Claim the Idempotency-Key**, by inserting the redemption row `ON CONFLICT DO NOTHING
+   RETURNING`. The claim *is* the redemption row, because the unique constraint that enforces
+   idempotency lives on it — which is why the reward read has to come first: the row cannot
+   be written without its snapshots. A read touches nothing valuable, so nothing is at risk
+   in that ordering.
+3. **`lockBalance`**, before the stock decrement. This call looks redundant — `appendEntry`
+   takes the same lock a few lines later — and it is not. Without it the locks would be taken
+   as (reward, then balance) while every other flow takes the balance first, and two
+   orderings across two resources is exactly the shape that deadlocks under load.
+4. **Conditional stock decrement.** `UPDATE rewards SET stock = stock - 1 WHERE id = ? AND
+   stock > 0`, checking affected rows. The update *is* the concurrency check: there is no
+   window between reading the count and decrementing it, because there is no read.
+5. **`appendEntry`** with a negative delta. If the balance will not cover it, the whole
+   transaction rolls back — including the stock unit, so a refused redemption never quietly
+   consumes inventory.
+
+### The blocking replay
+
+A second request with the same key does not get a 409. It blocks.
+
+`SELECT … FOR UPDATE` on the claimed row waits until the holder's transaction ends, then
+returns its outcome. The realistic cause is a double-clicked button where the second request
+is milliseconds behind the first, so the wait is short and resolves cleanly. A 409 would push
+a retry loop onto the client for a race the server can settle — and the client cannot tell
+that race apart from a genuine failure.
+
+Two consequences that would otherwise be baffling in production:
+
+- **If the blocked read returns zero rows, the holder rolled back.** Their row only ever
+  existed inside a transaction that aborted, so in committed state it never existed at all.
+  The claim is re-attempted exactly once — bounded, never a loop, because if one retry does
+  not settle it then retrying is not what is wrong. Unhandled, this is an undefined
+  dereferenced under load: a mysterious null that no test reproduces.
+- **A replay can legitimately unblock on a `RESERVED` redemption**, because the claim commits
+  with phase 1 while fulfilment is still running. Two identical requests can therefore return
+  different bodies — the first eventually says `FULFILLED`, the second may say `RESERVED` —
+  and that is correct rather than a race. Each reports the truth at the moment it answered.
+  Reporting a guessed final state would be the actual bug.
+
+`SET LOCAL statement_timeout = '10s'` scopes the cap to the transaction rather than changing
+behaviour for every other query in the pool. It exists because of that blocking path: if the
+holder is genuinely wedged, this turns an indefinite hang into one loud error instead of
+every retry queueing forever behind it.
+
+### Phase 2, outside any transaction
+
+Fulfilment is called with no transaction open. Holding one across a third party's network
+call would hold the balance row lock for the duration of their latency, so one slow provider
+stalls every other redemption for that user. Worse, their timeout would roll back a debit for
+a voucher that may already have been issued — we would have given the reward away and kept
+the points.
+
+On failure the compensation writes a `REVERSAL` entry, returns the stock unit, and marks the
+redemption `FAILED` with a reason. It is guarded by a conditional status transition
+(`RESERVED → FAILED`, checking affected rows), the same shape as the stock decrement and the
+backfill claim, so a retried failure handler cannot refund twice or return two units for one
+reservation. Inside that transaction the order is balance before rewards, per the invariant.
+
+`FULFILLMENT_FAILURE_RATE` exists so this path is genuinely reachable. A compensating reversal
+that has never run is a compensating reversal that does not work, and this is the branch
+nobody exercises by clicking around.
+
+The cost of the split is a real state a crash can strand: `RESERVED`, with points debited and
+nothing issued. `reservedAt` is recorded so those are findable, and the sweeper is in the
+known gaps rather than pretended away.
+
+### One deliberate exception to the tx-first convention
+
+`redeem()` takes a `PrismaClient`, not a `Tx`. It is the only service function that does.
+
+Every other service accepts an open transaction because the caller owns the boundary — but a
+two-phase operation has no single boundary to hand it. There are two, with a third party's
+network call in between, and only this function is positioned to know where each one ends.
+The convention still holds underneath: `reserve` and `compensate` both take `tx` and neither
+opens a transaction, and `redeem` does nothing with the database except own the boundaries.
+
+### Status codes
+
+`201` for a redemption this request created, `200` for a replay — with an **identical body**
+either way, so a client that retried after a timeout can treat both the same. If a replay
+returned less than the original, the retry would look like a partial success and the client
+would have to special-case it, which is the burden idempotency exists to remove.
+
+Both refusals are `409`, because the request was well-formed and the conflict is with current
+state, but they carry distinct codes. "Earn more points" is something a user can act on;
+"this is out of stock" is not, and showing the wrong one is worse than showing nothing.
+
 ## Smaller choices
 
 - **Every route under `/api`, health included.** The Vite dev proxy then needs one rule, the
@@ -615,6 +743,97 @@ failure rather than a loud one, which is why they are written down.
 - **pnpm 11 renamed `onlyBuiltDependencies` to `allowBuilds`.** With the old key, install
   reports success but skips Prisma's postinstall, so the client is never generated and the
   first `tsc` fails with import errors that point nowhere near the cause.
+
+## Bugs found by adversarial review, after the tests were green
+
+All of Phase 4's tests passed — including twenty concurrent redemptions against a balance
+affording exactly one. Then five independent reviewers were pointed at the value-moving code
+with instructions to find sequences producing a wrong outcome, and every finding was checked
+by two more reviewers told to refute it and to default to "refuted" when uncertain.
+
+Four survived. They are recorded here because each one was invisible to a passing suite, and
+because the shape of the mistakes is more useful than the fixes.
+
+### 1. Webhook crediting ran outside a transaction
+
+`webhook.routes.ts` called `processDelivery(prisma, …)` — the bare client, not a transaction.
+Four of the five reviewers found it independently.
+
+`appendEntry` reads the balance under `SELECT … FOR UPDATE` and then writes an absolute
+value. With no surrounding transaction every statement autocommits, so the row lock was
+released the instant the SELECT finished and nothing spanned the read-modify-write. It was
+precisely the lost update that lock exists to prevent, in the one path that did not have the
+transaction its own docstring assumed.
+
+It compiled silently because `Tx` is `Omit<PrismaClient, ITXClientDenyList>`, which
+`PrismaClient` structurally satisfies — deliberate, so read-only paths can pass `prisma`
+directly, and exactly what let a write path do the same. NOTES §9 had already written down
+"`appendEntry` must run inside a transaction"; the rule was documented and then broken two
+phases later.
+
+No test caught it because the webhook suite only ever replayed the *same* event id, where
+the ledger's `(source, external_event_id)` unique constraint masks the problem entirely. The
+regression test posts eight concurrent **distinct** events and asserts the cached balance
+equals the ledger sum. Against the old code it credited 400 and cached 100.
+
+The lesson worth keeping: a type that is deliberately permissive in one direction will
+eventually be used in the other, and a convention documented in prose is not enforced.
+
+### 2. `appendEntry` refused every credit into a negative balance
+
+The guard was `if (enforceNonNegative && balanceAfter < 0)` — it tested the *result*, not
+whether the entry was a debit. Once a clawback put a balance below zero, every subsequent
+credit was rejected too, so the webhook answered 500 forever and the user could never earn
+their way out.
+
+That is the exact opposite of the reasoning used to justify dropping
+`CHECK (balance >= 0)` in the first place: negative balances are acceptable *because* they
+are recoverable. The guard made them permanent. Now `input.delta < 0 &&  balanceAfter < 0` —
+a credit can only ever move a balance toward zero and is never a reason to refuse.
+
+### 3. A replay was unreachable once the catalogue changed
+
+`reserve` validated the reward — not found, or inactive — *before* claiming the idempotency
+key. So a client retrying a redemption that had already succeeded got a 409 if the reward had
+since been deactivated, having already been charged. And the client that retries is by
+definition the one whose first attempt timed out, so it had no way to discover the truth.
+
+The fix is a read-only lookup for an existing redemption before the reward is read at all. A
+replay now wins over any catalogue change. The authoritative claim is still the
+`INSERT … ON CONFLICT`, which is what settles a genuine race; this is only the fast path for
+work that is already done.
+
+### 4. A NUL character wedged a delivery in a retry loop
+
+PostgreSQL cannot store a NUL in `text` or `jsonb` at all. A payload carrying one failed on
+INSERT rather than in validation, so it answered 500 — which tells the partner to retry, and
+the retry failed identically, forever.
+
+Both forms are now rejected as permanently invalid: the literal byte before capture, since
+that one cannot be stored even as evidence, and the backslash-u-0000 JSON escape after parsing. The
+first attempt at the second check was `JSON.stringify(value).includes(NUL)`, which never
+matches anything — `stringify` re-escapes a NUL back into its six-character form. It looked
+correct and tested nothing, which is why `containsNul` walks the decoded values instead.
+
+### Also fixed: a documented timeout that could never fire
+
+`SET LOCAL statement_timeout = '10s'` was described as the bound on the blocking replay path.
+Prisma's default interactive-transaction timeout is **5 seconds** — shorter — so a blocked
+replay was always killed first by Prisma with an opaque `P2028`, and the statement timeout
+never ran. The `$transaction` call now passes an explicit 15-second timeout so the inner
+bound is the one that fires.
+
+### And two test-quality problems
+
+The webhook suite used fixed activity-type names, so a run that failed before its cleanup
+poisoned the next one through the no-overlapping-windows constraint. Names are now unique per
+run.
+
+One test was named "prices a late event at the historical rate" and actually asserted a 400,
+because the seeded rule boundary is older than the 90-day freshness window so the event never
+reached pricing. A test whose name does not match what it checks is worse than no test: it
+reports coverage that does not exist. It was replaced with two that genuinely exercise
+historical pricing.
 
 ## Known gaps
 

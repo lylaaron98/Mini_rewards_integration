@@ -71,6 +71,18 @@ async function post(body: unknown, options: { signed?: boolean; skew?: number } 
   return app.inject({ method: 'POST', url: `/api/webhooks/${PARTNER}`, headers, payload: rawBody })
 }
 
+/**
+ * A fresh activity type per test.
+ *
+ * Fixed names meant that a run which failed before its cleanup left rules
+ * behind, and the next run then hit the no-overlapping-windows exclusion
+ * constraint or silently found a rule where it expected none. Unique names
+ * make each test independent of every previous run.
+ */
+function testActivityType(label: string): string {
+  return `${TEST_PREFIX}${label}-${randomUUID()}`
+}
+
 async function createUser(): Promise<string> {
   const ref = `${TEST_PREFIX}${randomUUID()}`
   await prisma.user.create({ data: { externalRef: ref, displayName: 'Webhook Test User' } })
@@ -174,6 +186,46 @@ describe('webhook validation', () => {
     await prisma.webhookDelivery.delete({ where: { id: response.json().deliveryId } })
   })
 
+  /**
+   * PostgreSQL cannot store a NUL in a text column at all, so an unhandled one
+   * fails on INSERT and answers 500 — telling the partner to retry a request
+   * that can never succeed. Both forms have to be caught: the literal byte
+   * before capture, and the JSON escape after parsing, since the escape is six
+   * ordinary characters with no NUL byte in the body to scan for.
+   */
+  it('rejects a NUL byte in the body rather than wedging on a 500', async () => {
+    const response = await post(`{"event_id":"nul-literal${String.fromCharCode(0)}","user_ref":"x"}`)
+
+    expect(response.statusCode).toBe(400)
+    expect(response.json()).toMatchObject({ error: 'invalid_payload' })
+  })
+
+  it('rejects a NUL smuggled through a JSON escape', async () => {
+    const userRef = await createUser()
+    const eventId = `${TEST_PREFIX}${randomUUID()}`
+    const body = JSON.stringify({
+      event_id: eventId,
+      user_ref: userRef,
+      activity_type: 'PURCHASE',
+      occurred_at: new Date().toISOString(),
+      // Built rather than written literally: JSON.stringify turns this into the
+      // six-character escape sequence in the body, which is exactly the form
+      // that a scan of the raw bytes cannot see.
+      metadata: { note: `ends with ${String.fromCharCode(0)}` },
+    })
+
+    const response = await post(body)
+
+    expect(response.statusCode).toBe(400)
+    expect(response.json().message).toContain('NUL')
+
+    // Recorded once, as permanently invalid, rather than retried forever.
+    const stored = await prisma.webhookDelivery.findUnique({
+      where: { partner_externalEventId: { partner: PARTNER, externalEventId: eventId } },
+    })
+    expect(stored?.status).toBe('REJECTED')
+  })
+
   it('rejects an event dated more than 90 days in the past', async () => {
     const userRef = await createUser()
     const old = new Date(Date.now() - 91 * 24 * 60 * 60 * 1000).toISOString()
@@ -252,7 +304,7 @@ describe('webhook crediting', () => {
    */
   it('prices a late event at the rate in force when it occurred, not the current one', async () => {
     const userRef = await createUser()
-    const activityType = `${TEST_PREFIX}LATE`
+    const activityType = testActivityType('LATE')
     const supersededAt = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000)
     const occurredAt = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000)
 
@@ -285,7 +337,7 @@ describe('webhook crediting', () => {
    */
   it('prices an event at a rule boundary using the successor rule', async () => {
     const userRef = await createUser()
-    const activityType = `${TEST_PREFIX}BOUNDARY`
+    const activityType = testActivityType('BOUNDARY')
     const boundary = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000)
 
     await prisma.earningRule.create({
@@ -321,7 +373,7 @@ describe('unmatched deliveries and backfill', () => {
 
   it('parks an event with no matching rule as 202, and credits nothing', async () => {
     const userRef = await createUser()
-    const activityType = `${TEST_PREFIX}SURVEY`
+    const activityType = testActivityType('SURVEY')
     const response = await post(buildEvent({ userRef, activityType }))
 
     expect(response.statusCode).toBe(202)
@@ -339,7 +391,7 @@ describe('unmatched deliveries and backfill', () => {
    */
   it('credits a parked event at the historical rate once the rule is added', async () => {
     const userRef = await createUser()
-    const activityType = `${TEST_PREFIX}WEBINAR`
+    const activityType = testActivityType('WEBINAR')
     const occurredAt = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
 
     const parked = await post(buildEvent({ userRef, activityType, occurredAt: occurredAt.toISOString() }))
@@ -380,7 +432,7 @@ describe('unmatched deliveries and backfill', () => {
    */
   it('credits once when two backfills run concurrently', async () => {
     const userRef = await createUser()
-    const activityType = `${TEST_PREFIX}CONCURRENT`
+    const activityType = testActivityType('CONCURRENT')
 
     const parked = await post(buildEvent({ userRef, activityType }))
     expect(parked.json()).toMatchObject({ status: 'UNMATCHED', reason: 'NO_RULE' })
@@ -405,6 +457,50 @@ describe('unmatched deliveries and backfill', () => {
     const user = await prisma.user.findUniqueOrThrow({ where: { externalRef: userRef } })
     expect(await prisma.pointTransaction.count({ where: { userId: user.id } })).toBe(1)
     expect((await prisma.userBalance.findUnique({ where: { userId: user.id } }))?.balance).toBe(42)
+  })
+
+  /**
+   * Regression: crediting must run inside a transaction.
+   *
+   * `appendEntry` reads the balance under `SELECT ... FOR UPDATE` and then
+   * writes an absolute value. Without a surrounding transaction each statement
+   * autocommits, so the row lock is released the instant the SELECT finishes
+   * and the read-modify-write has no lock spanning it — the exact lost update
+   * the lock exists to prevent.
+   *
+   * Distinct event ids, so the ledger's own dedupe constraint cannot mask it:
+   * every credit inserts a row, and the cached balance must equal their sum.
+   */
+  it('keeps the balance consistent when concurrent distinct events credit one user', async () => {
+    const userRef = await createUser()
+    const activityType = testActivityType('CONCURRENTCREDIT')
+
+    await prisma.earningRule.create({
+      data: {
+        activityType,
+        points: 50,
+        effectiveFrom: new Date(Date.now() - 60 * 60 * 1000),
+        effectiveTo: null,
+      },
+    })
+
+    const responses = await Promise.all(
+      Array.from({ length: 8 }, () => post(buildEvent({ userRef, activityType }))),
+    )
+
+    for (const response of responses) {
+      expect(response.statusCode).toBe(202)
+    }
+
+    const user = await prisma.user.findUniqueOrThrow({ where: { externalRef: userRef } })
+
+    const entries = await prisma.pointTransaction.findMany({ where: { userId: user.id } })
+    const ledgerSum = entries.reduce((total, entry) => total + entry.delta, 0)
+    const cached = await prisma.userBalance.findUnique({ where: { userId: user.id } })
+
+    expect(entries).toHaveLength(8)
+    expect(ledgerSum).toBe(400)
+    expect(cached?.balance).toBe(ledgerSum)
   })
 
   it('refuses an unfiltered backfill', async () => {
