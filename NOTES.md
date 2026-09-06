@@ -2,6 +2,49 @@
 
 Why this is built the way it is.
 
+## The short version
+
+### Decisions
+
+- **The ledger is the truth.** Append-only. A balance is a cache recomputed from it. A failed
+  fulfilment writes a `REVERSAL`; nothing is ever edited or deleted.
+- **One module writes it.** Only `ledger.service.ts`, so the rule above is enforceable rather
+  than a convention.
+- **Every write assumes it runs twice.** Earning dedupes on the partner's `event_id`,
+  redemption on an `Idempotency-Key`. Two constraints, because a partner retry and a
+  double-click only look alike.
+- **Redemption is two-phase.** Debit in a transaction, fulfil outside it, compensate on
+  failure — rather than hold a lock for however long a third party takes.
+- **The webhook is untrusted.** HMAC over the raw bytes, body stored before parsing, events we
+  cannot match parked with a reason instead of dropped.
+- **Rules are versioned by time window,** priced against `occurredAt` — a late delivery is
+  worth what it was worth when it happened.
+
+### Trade-offs
+
+- **Ingestion is synchronous.** Capture and process are already separate transactions, so a
+  worker is a queue and a poller, not a redesign. Today a slow database becomes a
+  partner-visible timeout.
+- **Fulfilment is a stub** with a configurable failure rate — which is what makes the
+  compensation path demonstrable.
+- **No sweeper for stranded `RESERVED` redemptions.** A correct one needs the provider's real
+  timeout; a number invented here would look finished and double-issue.
+- **No component library, hand-rolled router.** Cost time, bought control of focus, motion and
+  failure wording.
+- **No earning caps.** They reintroduce the ordering problem versioned rules removed.
+
+### With more time
+
+1. **The `RESERVED` sweeper** — the only place a user can lose points and nothing recovers
+   them.
+2. **Ingestion on a worker,** which makes the `202` honest.
+3. **Error states on Rewards and Activity, and an error boundary.** A failed request there
+   currently reads as "nothing matches your filter".
+4. **Metrics and alerting** on unmatched deliveries and reconciliation drift — a `NO_RULE` gap
+   should page someone, not wait to be noticed.
+
+Full reasoning for all of it is below.
+
 ## Points are money
 
 The ledger, `point_transactions`, is append-only and is the only source of truth about what
@@ -146,13 +189,28 @@ running — each response is the truth at the moment it answered.
   kill a redemption between its commit and its fulfilment call. Waiting forever is not
   graceful, it is a hang that ends in SIGKILL, so losing the race is logged as the incident it
   is.
+- **History is cursor-paginated, never offset.** A ledger is a feed being appended to, and
+  `OFFSET` means an entry landing between two requests pushes everything down: the next page
+  repeats a row and silently skips another. On the one screen whose purpose is auditing a
+  balance, a list that quietly lies is worse than no pagination. The cursor compares
+  `(createdAt, id)` as a pair, because a redemption and its reversal routinely share a
+  millisecond. Ordering flips the *comparison* as well as the sort — flipping only the sort
+  returns the rows before the cursor, so page two repeats page one — which is why the filter
+  and the ordering are part of the client's query key: changing either starts a new list
+  rather than resuming with a cursor that no longer means what it did.
 
 ## Deliberate cuts
 
-- **Real authentication.** An `X-Demo-User` header stands in for a session. Building real auth
-  would have consumed the time that went into the ledger and the redemption path while
-  demonstrating nothing about this problem — and it is one seam, so replacing it means
-  changing one hook.
+- **Account recovery.** Authentication itself is real — scrypt-hashed passwords, opaque
+  session tokens stored only as hashes, an httpOnly cookie, rate-limited login and register,
+  and no response that lets an attacker enumerate who has an account. What is missing is the
+  lifecycle around it: password reset, email verification, and lockout after repeated
+  failures. Each needs a mail path and a policy number — how many failures, how long a lock —
+  that belongs to a product rather than to this exercise, and none of them changes the shape
+  of what is here. The seam this was originally cut at is worth recording: authentication
+  began as an `X-Demo-User` header, and replacing it with real sessions changed
+  `plugins/auth.ts` plus the routes that issue them, because every other route reads
+  `request.user` and none of them knows where it came from.
 - **An asynchronous queue.** Ingestion is already split into `captureDelivery` and
   `processDelivery` across separate transactions, so moving to a worker means the route stops
   calling the second one and a worker polls `RECEIVED` instead. Neither function changes. The
@@ -219,9 +277,11 @@ because nothing ever updates a ledger row.
 2. **Move ingestion to a worker.** Synchronous processing means a slow database turns into
    webhook timeouts and partner retries. The split already exists; this is a queue and a
    poller, and it makes the 202 contract honest rather than aspirational.
-3. **Real authentication and per-user authorization**, which also deletes `/api/demo/users`
-   rather than securing it. Second because everything above it is a correctness problem and
-   this is a deployment blocker — but it blocks absolutely.
+3. **Close the demo seams and finish the account lifecycle.** `/api/demo/users` lists seeded
+   accounts for the sign-in screen and `/api/dev/*` is registered only outside production;
+   both are review affordances rather than features, and they get deleted rather than
+   secured. With them go password reset, email verification and lockout — the difference
+   between authentication that works and authentication that can be operated.
 4. **Per-partner secrets in a table, with rotation.** `source`, the delivery key and the
    route are already scoped per partner, so this is configuration rather than schema. It
    matters the moment there is a second partner, and rotation matters the first time a secret

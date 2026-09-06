@@ -46,9 +46,11 @@ with a button that fills the form in for you.
 
 Sign in as **admin@example.com** — the panel is visible to administrator accounts only.
 
-Most of what this service does happens behind a signed webhook, and the panel at the bottom
-of the page is how to see it without hand-crafting an HMAC. Every button signs a real payload
-and posts it to the real webhook route, crediting whichever account you pick in the panel:
+Most of what this service does happens behind a signed webhook, and the **Developer** page —
+reachable from the navigation drawer, or at `#/developer` — is how to see it without
+hand-crafting an HMAC. It is five cards, one per tool: simulate activity, allocate rewards,
+create a reward, inspect deliveries, reconcile the ledger. Every button signs a real payload
+and posts it to the real webhook route, crediting whichever account you pick:
 
 | Button | What it demonstrates |
 | --- | --- |
@@ -113,7 +115,7 @@ silently rewriting a balance would destroy the evidence of whatever wrote it wro
 | Account | Balance | What they exercise |
 | --- | --- | --- |
 | Ada Lovelace | 355 | Purchases priced by two rule versions, a fulfilled redemption, and one that failed and was reversed |
-| Grace Hopper | 515 | A smaller history, so switching users shows different data |
+| Grace Hopper | 15 | A smaller history, and the redemption that took the last enamel pin |
 | Alan Turing | 0 | The empty state — a real screen, and the one most likely to be broken by nobody looking at it |
 | Dev Admin | 0 | The only account that can see the developer panel |
 
@@ -130,10 +132,14 @@ administrator has no history of their own, the panel lets them choose which acco
 simulated activity is credited to.
 
 Plus three deliveries that produced no ledger entry (one `UNMATCHED` per reason, one
-`REJECTED` with a malformed payload) and rewards from 50 to 25,000 points, so both a
-successful redemption and an insufficient-funds refusal are reachable without editing the
-database. The seed is destructive by design: it clears every table first, so re-running it
-always produces the same state.
+`REJECTED` with a malformed payload) and six rewards from 50 to 25,000 points, so a
+successful redemption, an insufficient-funds refusal and a sold-out reward are all reachable
+without editing the database. The last of those is the Limited Edition Enamel Pin: stocked at
+one, and Grace takes it in the seeded history, so the catalogue has a genuinely sold-out card
+from the first page load rather than a `stock: 0` row that nothing in the app could have
+produced. It is also what separates the **In stock** filter from **Everything** on the rewards
+page — without it the two show the same list. The seed is destructive by design: it clears
+every table first, so re-running it always produces the same state.
 
 ## API
 
@@ -145,7 +151,7 @@ always produces the same state.
 | POST | `/api/auth/logout` | Revokes the session server-side |
 | GET | `/api/auth/me` | The signed-in account and its role |
 | GET | `/api/me` | Balance and profile. Requires a session |
-| GET | `/api/me/transactions` | Ledger history, cursor-paginated. `?cursor=&limit=&type=` |
+| GET | `/api/me/transactions` | Ledger history, cursor-paginated. `?cursor=&limit=&type=&order=` |
 | GET | `/api/rewards` | Catalogue, cheapest first, with `inStock` |
 | POST | `/api/redemptions` | Redeem. Requires a session and `Idempotency-Key` |
 | GET | `/api/demo/users` | Seeded accounts for the sign-in screen. Demo only |
@@ -224,10 +230,15 @@ packages/
         dev/               Simulator and inspection. Not registered in production
   web/                     React + Vite + TanStack Query + Tailwind
     src/
-      App.tsx              Layout and the redemption flow
-      components/          Balance, Rewards, History, RedeemDialog, DevPanel
+      App.tsx              The shell: session, drawer, header, current page
+      pages/               Overview, Rewards, Activity — each owns its own data
+      components/          Sidebar (the drawer), Card, Balance, History,
+                           RedeemDialog, RewardAdmin, DevPanel
       lib/
         api.ts             The single API client
+        use-route.ts       Hash routing: the URL is the source of truth
+        use-nav-drawer.ts  Drawer state, remembered across reloads
+        use-theme.ts       Light/dark, seeded from the system preference
         redemption-copy.ts Per-error-code copy, including the refund wording
         toast.tsx          Minimal toast provider
 ```

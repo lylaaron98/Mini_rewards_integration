@@ -137,6 +137,12 @@ export type SeedReward = {
  * save for". A catalogue where everything is affordable never exercises the
  * insufficient-funds path, and one where nothing is never exercises redemption
  * at all.
+ *
+ * It also spans the stock states: unlimited, plenty, nearly gone, and — through
+ * the history below — already sold out. A catalogue where everything is in stock
+ * makes the sold-out card, the "Out of stock" reason and the in-stock filter all
+ * dead code until someone clicks a reward down to zero by hand, which is the
+ * kind of path that quietly rots.
  */
 export const SEED_REWARDS: SeedReward[] = [
   {
@@ -153,6 +159,17 @@ export const SEED_REWARDS: SeedReward[] = [
     description: 'One free coffee at any participating café.',
     costPoints: 250,
     stock: 50,
+    active: true,
+  },
+  {
+    sku: 'ENAMEL-PIN',
+    name: 'Limited Edition Enamel Pin',
+    description: 'One of a numbered run made for the partner launch.',
+    costPoints: 500,
+    // Exactly one, and Grace takes it in the history below — so a freshly
+    // seeded database already has a sold-out reward on the shelf rather than
+    // needing one to be manufactured by clicking.
+    stock: 1,
     active: true,
   },
   {
@@ -219,7 +236,8 @@ export type SeedHistoryEntry = SeedEarn | SeedRedeem
  * matters because CHECK (balance >= 0) is enforced on every intermediate write,
  * not just the final state.
  *
- * Ada ends on 355 points after earning 605 and spending 250.
+ * Ada ends on 355 points after earning 605 and spending 250. Grace ends on 15,
+ * having spent 500 of her 515 on the last enamel pin.
  */
 export const SEED_HISTORY: SeedHistoryEntry[] = [
   // Priced by purchase-v1 at 10 points. Sits in the history right next to
@@ -308,6 +326,25 @@ export const SEED_HISTORY: SeedHistoryEntry[] = [
     ruleKey: 'purchase-v2',
     occurredAt: new Date('2026-09-02T10:15:00.000Z'),
     description: 'Purchase at Riverside Market',
+  },
+
+  /**
+   * Grace takes the only enamel pin, which is what leaves the catalogue with a
+   * sold-out reward from the first page load.
+   *
+   * Written as a redemption by another user rather than as `stock: 0` on the
+   * reward itself, because stock reaching zero is a consequence of something
+   * happening — and doing it this way means the seeded database is one the
+   * application could actually have produced, rather than a state only the seed
+   * knows how to reach.
+   */
+  {
+    kind: 'redeem',
+    userRef: 'acme-user-002',
+    sku: 'ENAMEL-PIN',
+    idempotencyKey: 'seed-redemption-grace-1',
+    occurredAt: new Date('2026-09-04T09:30:00.000Z'),
+    outcome: 'fulfilled',
   },
 ]
 

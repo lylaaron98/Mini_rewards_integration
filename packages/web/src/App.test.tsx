@@ -109,7 +109,25 @@ beforeEach(() => {
           balance: 355,
         })
       }
-      if (url.startsWith('/api/dev/')) return respond(200, { deliveries: [], summary: {} })
+      /*
+        The two developer endpoints have different shapes, and one stub for both
+        handed the reconciliation card a delivery list: `healthy` came back
+        undefined, which reads as "balances disagree", and the component then
+        went looking for the discrepancy list it had been promised and threw.
+
+        The bug was in the fixture rather than the app — the real endpoint always
+        answers with both fields — but a stub that cannot represent a healthy
+        ledger cannot test one either.
+      */
+      if (url.startsWith('/api/dev/reconcile')) {
+        return respond(200, { healthy: true, discrepancies: [] })
+      }
+      if (url.startsWith('/api/dev/')) {
+        return respond(200, {
+          deliveries: [],
+          summary: { total: 0, unmatched: 0, noRule: 0, unknownUser: 0 },
+        })
+      }
 
       throw new Error(`Unhandled request: ${url}`)
     }),
@@ -460,6 +478,129 @@ describe('navigation', () => {
 
     expect(await screen.findByRole('region', { name: /your balance/i })).toBeInTheDocument()
   })
+
+  /**
+   * The drawer's state is announced through aria-expanded rather than inferred
+   * from a class name, because that attribute is the whole contract: it is what
+   * a screen reader reads out, and asserting on styling instead would let the
+   * announcement break while the test still passed.
+   *
+   * jsdom applies no CSS, so this exercises the narrow-screen behaviour — the
+   * stubbed matchMedia reports "not wide", which is the layout where closing
+   * actually matters.
+   */
+  it('opens and closes the navigation drawer', async () => {
+    const user = userEvent.setup()
+    renderApp()
+
+    const toggle = await screen.findByRole('button', { name: 'Navigation menu' })
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+
+    await user.click(toggle)
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+
+    await user.click(screen.getByRole('button', { name: 'Close navigation menu' }))
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+
+    // Focus returns to the control that opened it, rather than being left on a
+    // button that has just slid off the screen.
+    expect(toggle).toHaveFocus()
+  })
+
+  /**
+   * On a narrow screen the drawer covers the page it navigates to, so a link
+   * that left it open would hide the result of following it.
+   */
+  it('closes the drawer after following a link on a narrow screen', async () => {
+    const user = userEvent.setup()
+    renderApp()
+
+    const toggle = await screen.findByRole('button', { name: 'Navigation menu' })
+    await user.click(toggle)
+
+    const nav = screen.getByRole('navigation', { name: /sections/i })
+    await user.click(within(nav).getByRole('link', { name: /rewards/i }))
+
+    expect(await screen.findByRole('heading', { name: 'Rewards', level: 2 })).toBeInTheDocument()
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  })
+})
+
+describe('the activity page', () => {
+  /**
+   * Filtering and ordering are server-side. Filtering the loaded page in the
+   * browser would report a count drawn from the most recent fifteen entries
+   * while ignoring every older one — an answer that looks precise and is wrong.
+   */
+  it('asks the server for the filtered, ordered list', async () => {
+    const user = userEvent.setup()
+    renderApp('activity')
+
+    await screen.findByRole('heading', { name: 'Activity', level: 2 })
+
+    await user.click(screen.getByRole('button', { name: 'Spent' }))
+
+    await waitFor(() => {
+      const urls = vi.mocked(fetch).mock.calls.map(([url]) => String(url))
+      expect(urls.some((url) => url.includes('type=REDEEM'))).toBe(true)
+    })
+  })
+
+  it('reorders through the server rather than reversing what is loaded', async () => {
+    const user = userEvent.setup()
+    renderApp('activity')
+
+    await screen.findByRole('heading', { name: 'Activity', level: 2 })
+
+    await user.selectOptions(screen.getByLabelText('Order'), 'oldest')
+
+    await waitFor(() => {
+      const urls = vi.mocked(fetch).mock.calls.map(([url]) => String(url))
+      expect(urls.some((url) => url.includes('order=oldest'))).toBe(true)
+    })
+  })
+
+  /**
+   * A cursor is only meaningful for the query that issued it, so changing a
+   * filter has to start a new list rather than resume an old one. The filters
+   * being part of the query key is what guarantees that.
+   */
+  it('starts a new list rather than reusing a cursor from the old one', async () => {
+    const user = userEvent.setup()
+    renderApp('activity')
+
+    await screen.findByRole('heading', { name: 'Activity', level: 2 })
+    await user.click(screen.getByRole('button', { name: 'Earned' }))
+
+    await waitFor(() => {
+      const filtered = vi
+        .mocked(fetch)
+        .mock.calls.map(([url]) => String(url))
+        .filter((url) => url.includes('type=EARN'))
+
+      expect(filtered.length).toBeGreaterThan(0)
+      // No cursor on the first request of a newly filtered list.
+      expect(filtered[0]).not.toContain('cursor=')
+    })
+  })
+
+  it('says what a filtered empty list means', async () => {
+    const user = userEvent.setup()
+
+    handlers = [
+      (url) =>
+        url.includes('type=REVERSAL')
+          ? { body: { items: [], nextCursor: null } }
+          : (undefined as never),
+    ]
+
+    renderApp('activity')
+    await screen.findByRole('heading', { name: 'Activity', level: 2 })
+
+    await user.click(screen.getByRole('button', { name: 'Refunded' }))
+
+    expect(await screen.findByText(/No entries of that kind yet/i)).toBeInTheDocument()
+  })
 })
 
 describe('the developer section', () => {
@@ -493,6 +634,43 @@ describe('the developer section', () => {
     renderApp('developer')
 
     expect(await screen.findByRole('heading', { name: /developer panel/i })).toBeInTheDocument()
+  })
+
+  /**
+   * Allocation is a bulk operation, and the recipients control has to both be
+   * and look like a multiple choice.
+   *
+   * Asserted through the checkbox role rather than by clicking styled elements:
+   * the previous pills were checkboxes too, under an appearance that read as a
+   * single-choice tab strip, so "is it announced as a checkbox and does it hold
+   * more than one" is exactly the property worth pinning down.
+   */
+  it('lets an administrator pick several recipients at once', async () => {
+    const user = userEvent.setup()
+
+    handlers = [
+      (url) =>
+        url.startsWith('/api/auth/me') ? { status: 200, body: ADMIN } : (undefined as never),
+    ]
+
+    renderApp('developer')
+
+    const ada = await screen.findByRole('checkbox', { name: /Ada Lovelace/ })
+    const alan = screen.getByRole('checkbox', { name: /Alan Turing/ })
+
+    await user.click(ada)
+    await user.click(alan)
+
+    // The second choice adds to the first rather than replacing it.
+    expect(ada).toBeChecked()
+    expect(alan).toBeChecked()
+    expect(screen.getByText('2 selected')).toBeInTheDocument()
+
+    await user.click(ada)
+
+    expect(ada).not.toBeChecked()
+    expect(alan).toBeChecked()
+    expect(screen.getByText('1 selected')).toBeInTheDocument()
   })
 })
 

@@ -6,6 +6,7 @@ import type { AllocationResult, ApiError } from '../lib/api'
 import { ApiError as ApiErrorClass } from '../lib/api'
 import { formatPoints } from '../lib/format'
 import { useToast } from '../lib/toast'
+import { Card } from './Card'
 
 /**
  * Creating rewards and allocating them, for administrators.
@@ -170,54 +171,100 @@ export function RewardAdmin() {
   const busy = allocate.isPending || runMacro.isPending
   const noneSelected = selectedUserIds.length === 0
 
+  /*
+    Two cards rather than one: allocating an existing reward and adding a new one
+    to the catalogue are different jobs that happen to be done by the same
+    person. Returned as a fragment so the page they sit on decides the spacing
+    between them, the same as it does for every other card.
+  */
   return (
-    <div className="space-y-6">
-      <div>
-        <h3 className="text-sm font-semibold tracking-wide text-slate-500 uppercase dark:text-slate-400">
-          Allocate rewards
-        </h3>
-        <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
-          Credits the reward&rsquo;s cost as an adjustment, then redeems it on the
-          user&rsquo;s behalf. Their balance ends unchanged and both entries appear in their
-          history.
-        </p>
-
+    <>
+      <Card
+        title="Allocate rewards"
+        description={
+          <>
+            Credits the reward&rsquo;s cost as an adjustment, then redeems it on the
+            user&rsquo;s behalf. Their balance ends unchanged and both entries appear in their
+            history.
+          </>
+        }
+      >
         {/* --- who --- */}
-        <fieldset className="mt-4">
+        <fieldset>
           <legend className="text-sm font-medium text-slate-700 dark:text-slate-300">
             Recipients
           </legend>
 
-          <div className="mt-2 flex flex-wrap gap-2">
+          <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+            Tick as many as you like — every allocation below goes to all of them.
+          </p>
+
+          {/*
+            A list of checkbox rows rather than a row of pills.
+
+            The pills were already multi-select — real checkboxes under the
+            styling — but nothing said so: a filled pill reads as the one
+            selected tab in a set, so the control looked like it could hold a
+            single answer while behaving like it could hold several. The
+            checkbox is now visible and does that job by itself.
+
+            Real checkboxes rather than clickable divs, as before. A checkbox is
+            reachable by keyboard, announced with its state, and togglable with
+            space — none of which comes free from a div with an onClick. The
+            whole row is the <label>, so the hit target is the row, not the
+            twelve pixels of the box.
+          */}
+          <ul className="mt-2 max-h-56 divide-y divide-slate-100 overflow-y-auto rounded-lg border border-slate-200 dark:divide-slate-800 dark:border-slate-800">
             {users.data?.map((user) => {
               const checked = selectedUserIds.includes(user.id)
 
               return (
-                /*
-                  Real checkboxes behind the styling rather than clickable divs.
-                  A checkbox is reachable by keyboard, announced with its state,
-                  and togglable with space — none of which comes free from a div
-                  with an onClick.
-                */
-                <label
-                  key={user.id}
-                  className={`flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-1.5 text-sm transition ${
-                    checked
-                      ? 'border-slate-900 bg-slate-900 text-white dark:border-slate-100 dark:bg-slate-100 dark:text-slate-900'
-                      : 'border-slate-300 text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800'
-                  }`}
-                >
-                  <input
-                    type="checkbox"
-                    className="sr-only"
-                    checked={checked}
-                    onChange={() => toggleUser(user.id)}
-                  />
-                  {user.displayName}
-                </label>
+                <li key={user.id}>
+                  <label
+                    className={`flex cursor-pointer items-center gap-3 px-3 py-2 text-sm transition ${
+                      checked
+                        ? 'bg-slate-100 dark:bg-slate-800'
+                        : 'hover:bg-slate-50 dark:hover:bg-slate-800/50'
+                    }`}
+                  >
+                    {/* Accented in the theme's ink rather than left as the
+                        browser's blue, which is the one colour nothing else on
+                        the page uses. */}
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleUser(user.id)}
+                      className="h-4 w-4 shrink-0 accent-slate-900 dark:accent-slate-100"
+                    />
+
+                    <span className="min-w-0">
+                      <span className="block truncate text-slate-800 dark:text-slate-100">
+                        {user.displayName}
+                      </span>
+                      {/* The external ref, because that is the identity the
+                          partner events carry and the thing an operator is
+                          actually matching against. */}
+                      <span className="block truncate font-mono text-xs text-slate-500 dark:text-slate-400">
+                        {user.externalRef}
+                      </span>
+                    </span>
+                  </label>
+                </li>
               )
             })}
-          </div>
+
+            {users.isPending && (
+              <li className="px-3 py-2 text-sm text-slate-500 dark:text-slate-400">
+                Loading accounts…
+              </li>
+            )}
+
+            {users.data?.length === 0 && (
+              <li className="px-3 py-2 text-sm text-slate-500 dark:text-slate-400">
+                No accounts to allocate to.
+              </li>
+            )}
+          </ul>
 
           <div className="mt-2 flex gap-3 text-xs">
             <button
@@ -330,10 +377,10 @@ export function RewardAdmin() {
             ))}
           </ul>
         )}
-      </div>
+      </Card>
 
       <CreateReward />
-    </div>
+    </>
   )
 }
 
@@ -380,13 +427,12 @@ function CreateReward() {
   })
 
   return (
-    <div>
-      <h3 className="text-sm font-semibold tracking-wide text-slate-500 uppercase dark:text-slate-400">
-        Create a reward
-      </h3>
-
+    <Card
+      title="Create a reward"
+      description="Adds an entry to the catalogue. Leave stock empty for an unlimited reward."
+    >
       <form
-        className="mt-3 grid gap-3 sm:grid-cols-2"
+        className="grid gap-3 sm:grid-cols-2"
         onSubmit={(event) => {
           event.preventDefault()
           create.mutate()
@@ -430,7 +476,7 @@ function CreateReward() {
           </button>
         </div>
       </form>
-    </div>
+    </Card>
   )
 }
 

@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { DevPanel } from './components/DevPanel'
-import { Sidebar } from './components/Sidebar'
+import { NavToggle, Sidebar } from './components/Sidebar'
 import { SignIn } from './components/SignIn'
 import { ThemeToggle } from './components/ThemeToggle'
 import { fetchMe, fetchSession, logout } from './lib/api'
 import { useToast } from './lib/toast'
+import { useNavDrawer } from './lib/use-nav-drawer'
 import { useRoute } from './lib/use-route'
 import { useTheme } from './lib/use-theme'
 import { ActivityPage } from './pages/ActivityPage'
@@ -25,6 +26,7 @@ export function App() {
   const { toast } = useToast()
   const { theme, toggle: toggleTheme } = useTheme()
   const { route, navigate } = useRoute()
+  const drawer = useNavDrawer()
 
   /**
    * The session is the root of everything else.
@@ -77,18 +79,32 @@ export function App() {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 lg:flex dark:bg-slate-950 dark:text-slate-100">
-      <Sidebar route={route} isAdmin={isAdmin} onNavigate={navigate} />
+      <Sidebar
+        route={route}
+        isAdmin={isAdmin}
+        open={drawer.open}
+        onNavigate={navigate}
+        onDismiss={drawer.dismiss}
+      />
 
       {/* min-w-0 so a wide child — a long description, a table — shrinks inside
           the flex row instead of pushing the layout sideways. */}
       <div className="min-w-0 flex-1">
         <header className="border-b border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
           <div className="mx-auto flex max-w-4xl items-center justify-between gap-4 px-4 py-4 sm:px-6">
-            <div>
-              <h1 className="text-lg font-semibold tracking-tight">Mini Rewards</h1>
-              <p className="text-sm text-slate-500 dark:text-slate-400">
-                Earn points from partner activity, spend them on rewards.
-              </p>
+            <div className="flex min-w-0 items-center gap-3">
+              {/* The toggle leads the header, beside the edge the drawer comes
+                  out of, and it stays there at every width — a control that
+                  changes place between layouts is one people have to find
+                  twice. */}
+              <NavToggle open={drawer.open} onToggle={drawer.toggle} buttonRef={drawer.buttonRef} />
+
+              <div className="min-w-0">
+                <h1 className="text-lg font-semibold tracking-tight">Mini Rewards</h1>
+                <p className="truncate text-sm text-slate-500 dark:text-slate-400">
+                  Earn points from partner activity, spend them on rewards.
+                </p>
+              </div>
             </div>
 
             <div className="flex items-center gap-3">

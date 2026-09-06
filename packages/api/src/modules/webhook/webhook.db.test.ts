@@ -25,6 +25,21 @@ const TEST_PREFIX = 'test-webhook-'
 
 let app: FastifyInstance
 
+/**
+ * Every delivery row this suite causes, collected as it goes.
+ *
+ * The prefix sweep below cannot find all of them. A body rejected before it
+ * parses has no readable `event_id`, so it is keyed by a hash of its bytes —
+ * `unparsed:…`, not `test-webhook-…` — and a sweep by prefix walks straight
+ * past it, which is how a run used to leave a rejected delivery sitting at the
+ * top of the developer panel's list afterwards.
+ *
+ * Sweeping `unparsed:` by prefix instead would take the seeded malformed
+ * delivery with it, and that row is demo data the deliveries view exists to
+ * show. Recording ids is the version that can tell the two apart.
+ */
+const createdDeliveryIds = new Set<string>()
+
 beforeAll(async () => {
   app = await buildApp()
 })
@@ -37,6 +52,7 @@ afterAll(async () => {
   await prisma.userBalance.deleteMany({ where: testUsers })
   await prisma.user.deleteMany({ where: { externalRef: { startsWith: TEST_PREFIX } } })
   await prisma.webhookDelivery.deleteMany({ where: { externalEventId: { startsWith: TEST_PREFIX } } })
+  await prisma.webhookDelivery.deleteMany({ where: { id: { in: [...createdDeliveryIds] } } })
   await prisma.earningRule.deleteMany({ where: { activityType: { startsWith: TEST_PREFIX } } })
   await prisma.$disconnect()
 })
@@ -69,7 +85,28 @@ async function post(body: unknown, options: { signed?: boolean; skew?: number } 
     headers[SIGNATURE_HEADER] = sign(SECRET, timestamp, rawBody)
   }
 
-  return app.inject({ method: 'POST', url: `/api/webhooks/${PARTNER}`, headers, payload: rawBody })
+  const response = await app.inject({
+    method: 'POST',
+    url: `/api/webhooks/${PARTNER}`,
+    headers,
+    payload: rawBody,
+  })
+
+  /*
+    Noted here rather than in each test, so a case added later cannot forget to
+    tidy up after itself. Every reply that captured a delivery carries its id,
+    including the rejections; the ones that captured nothing — a bad signature,
+    a NUL byte, a body refused before storage — have nothing to record.
+  */
+  try {
+    const body: unknown = response.json()
+    const deliveryId = (body as { deliveryId?: unknown }).deliveryId
+    if (typeof deliveryId === 'string') createdDeliveryIds.add(deliveryId)
+  } catch {
+    // Not a JSON body, so not a reply that recorded anything.
+  }
+
+  return response
 }
 
 /**
@@ -183,8 +220,6 @@ describe('webhook validation', () => {
     // Keyed by a content hash, since there is no readable event id. Bounded
     // storage: a partner retrying one broken request writes one row, not many.
     expect(stored?.externalEventId).toMatch(/^unparsed:[0-9a-f]{64}$/)
-
-    await prisma.webhookDelivery.delete({ where: { id: response.json().deliveryId } })
   })
 
   /**

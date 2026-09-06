@@ -5,6 +5,7 @@ import { fetchDeliveries, fetchReconcile, fetchUsers, simulateActivity } from '.
 import type { Delivery } from '../lib/api'
 import { formatTimestamp } from '../lib/format'
 import { useToast } from '../lib/toast'
+import { Card } from './Card'
 import { RewardAdmin } from './RewardAdmin'
 
 /**
@@ -41,10 +42,15 @@ export function DevPanel({ defaultUserRef }: { defaultUserRef: string }) {
         goes through the real webhook, signature and all.
       </p>
 
-      {/* No longer collapsible: it was a section competing for space on a shared
-          page, and a page that opens collapsed is a page asking to be clicked
-          before it does anything. */}
-      <div className="mt-6 space-y-8">
+      {/*
+        One card per tool, in the order a reviewer meets them: send an event,
+        grant a reward, look at what arrived, check the books still balance.
+
+        No longer collapsible: it was a section competing for space on a shared
+        page, and a page that opens collapsed is a page asking to be clicked
+        before it does anything.
+      */}
+      <div className="mt-6 space-y-6">
         <Simulator targetRef={targetRef} onTargetChange={setTargetRef} />
         <RewardAdmin />
         <Deliveries />
@@ -132,16 +138,11 @@ function Simulator({
   })
 
   return (
-    <div>
-      <h3 className="text-sm font-semibold tracking-wide text-slate-500 uppercase dark:text-slate-400">
-        Simulate partner activity
-      </h3>
-      <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
-        Signs a real payload with the partner secret and posts it to the webhook, exactly as the
-        partner would.
-      </p>
-
-      <div className="mt-3 flex items-center gap-2">
+    <Card
+      title="Simulate partner activity"
+      description="Signs a real payload with the partner secret and posts it to the webhook, exactly as the partner would."
+    >
+      <div className="flex items-center gap-2">
         <label htmlFor="sim-target" className="text-sm text-slate-600 dark:text-slate-400">
           Credit to
         </label>
@@ -189,7 +190,7 @@ function Simulator({
           Replay the last event id (should credit nothing)
         </button>
       )}
-    </div>
+    </Card>
   )
 }
 
@@ -197,22 +198,25 @@ function Deliveries() {
   const deliveries = useQuery({ queryKey: ['deliveries'], queryFn: fetchDeliveries })
 
   return (
-    <div>
-      <h3 className="text-sm font-semibold tracking-wide text-slate-500 uppercase dark:text-slate-400">
-        Recent deliveries
-      </h3>
-
-      {deliveries.data && (
-        <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
-          {deliveries.data.summary.unmatched} of {deliveries.data.summary.total} parked as
-          unmatched
-          {deliveries.data.summary.noRule > 0 && ` · ${deliveries.data.summary.noRule} with no rule`}
-          {deliveries.data.summary.unknownUser > 0 &&
-            ` · ${deliveries.data.summary.unknownUser} for unknown users`}
-        </p>
-      )}
-
-      <div className="mt-3 max-h-72 overflow-y-auto rounded-lg border border-slate-200 dark:border-slate-800">
+    <Card
+      title="Recent deliveries"
+      // The summary is the card's subtitle rather than a line inside it: it
+      // describes the list, and a description that scrolls away with the rows it
+      // describes is a description in the wrong place.
+      description={
+        deliveries.data && (
+          <>
+            {deliveries.data.summary.unmatched} of {deliveries.data.summary.total} parked as
+            unmatched
+            {deliveries.data.summary.noRule > 0 &&
+              ` · ${deliveries.data.summary.noRule} with no rule`}
+            {deliveries.data.summary.unknownUser > 0 &&
+              ` · ${deliveries.data.summary.unknownUser} for unknown users`}
+          </>
+        )
+      }
+    >
+      <div className="max-h-72 overflow-y-auto rounded-lg border border-slate-200 dark:border-slate-800">
         <ul className="divide-y divide-slate-100 dark:divide-slate-800">
           {deliveries.data?.deliveries.map((delivery) => (
             <DeliveryRow key={delivery.id} delivery={delivery} />
@@ -223,7 +227,7 @@ function Deliveries() {
           <p className="p-4 text-sm text-slate-500 dark:text-slate-400">No deliveries yet.</p>
         )}
       </div>
-    </div>
+    </Card>
   )
 }
 
@@ -281,17 +285,13 @@ function Reconcile() {
   const reconcile = useQuery({ queryKey: ['reconcile'], queryFn: fetchReconcile })
 
   return (
-    <div>
-      <h3 className="text-sm font-semibold tracking-wide text-slate-500 uppercase dark:text-slate-400">
-        Ledger reconciliation
-      </h3>
-      <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
-        Every cached balance compared against the sum of its ledger. Empty is healthy.
-      </p>
-
+    <Card
+      title="Ledger reconciliation"
+      description="Every cached balance compared against the sum of its ledger. Empty is healthy."
+    >
       {reconcile.data && (
         <p
-          className={`mt-3 rounded-lg border p-3 text-sm ${
+          className={`rounded-lg border p-3 text-sm ${
             reconcile.data.healthy
               ? 'border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900/60 dark:bg-emerald-950 dark:text-emerald-100'
               : 'border-red-200 bg-red-50 text-red-900 dark:border-red-900/60 dark:bg-red-950 dark:text-red-100'
@@ -312,6 +312,6 @@ function Reconcile() {
           ))}
         </ul>
       )}
-    </div>
+    </Card>
   )
 }
