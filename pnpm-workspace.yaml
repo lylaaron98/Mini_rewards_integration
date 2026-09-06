@@ -13,3 +13,11 @@ allowBuilds:
   '@prisma/engines': true
   prisma: true
   esbuild: true
+
+# The API package runs `prisma generate` in its own postinstall. Without it, a
+# fresh clone installs cleanly and then fails on `Cannot find module
+# '.prisma/client/default'` the first time anything imports the client — which
+# reads as a broken repository rather than a missing build step.
+#
+# It runs before `.env` exists, which is fine: generate reads the schema, not
+# the database, and does not need DATABASE_URL resolved.
